@@ -582,3 +582,197 @@ window.askPreviewRows = function (at, v, sub) {
     row(t("Undo the last sync"), t("It brought {parts} here {when}. Undo puts back what was here before, on this computer only.", { parts: syncParts(v.applied.parts), when: syncWhen(v.applied.at) }), undo, "sync-undo-row");
   }
 };
+
+window.codexSessionForm = function (followsServer) {
+  const form = el("div", "editor sync-form");
+  const field = el("input");
+  field.placeholder = t("Session ID");
+  field.setAttribute("aria-label", field.placeholder);
+  field.autocomplete = "off";
+  const download = el("button", "text", t("Download"));
+  const upload = el("button", "text", t("Upload…"));
+  const message = el("div", "sub wraps");
+  message.setAttribute("role", "status");
+  const transfer = async (action) => {
+    const id = field.value.trim();
+    if (!id) { field.focus(); return; }
+    upload.disabled = download.disabled = true;
+    message.textContent = "";
+    message.classList.remove("bad");
+    try {
+      if (action === "push" && !await confirmAction(t("Upload…"),
+        t("The selected conversation may contain private code, prompts and tool output. It will be encrypted before upload."), t("Upload…"))) return;
+      await api("davsync/session", { action, id });
+      message.textContent = t("Done");
+    } catch (err) {
+      message.textContent = t(err.message);
+      message.classList.add("bad");
+    } finally {
+      upload.disabled = download.disabled = false;
+    }
+  };
+  upload.onclick = () => transfer("push");
+  download.onclick = () => transfer("pull");
+  form.append(field, download);
+  if (!followsServer) form.append(upload);
+  form.append(message);
+  return form;
+};
+
+window.sessionBatchForm = function () {
+  const form = el("div", "editor sync-form session-batch-form");
+  const sourceList = el("div", "session-batch-sources");
+  const search = el("input");
+  search.type = "search";
+  search.placeholder = t("Filter sessions");
+  search.setAttribute("aria-label", search.placeholder);
+  const all = batchTick(t("All readable sessions"));
+  const agents = batchField(t("Source agent"), "select");
+  const everyAgent = el("option", "", t("All"));
+  everyAgent.value = "";
+  agents.input.append(everyAgent);
+  const sources = el("fieldset");
+  sources.append(el("legend", "", t("Sessions")), all.label, agents.label, search, sourceList);
+
+  const back = batchField(t("Existing backup IDs"), "textarea");
+  back.input.rows = 2;
+  const cwd = batchField(t("Target project folder"), "input");
+  const destinations = el("fieldset");
+  destinations.append(el("legend", "", t("Import into agents")));
+  const backup = el("button", "text", t("Back up"));
+  const distribute = el("button", "text primary", t("Back up and import"));
+  backup.type = distribute.type = "button";
+  const output = el("div", "session-batch-output sub wraps");
+  output.setAttribute("role", "status");
+  const actions = el("div", "bar");
+  actions.append(backup, distribute);
+  form.append(sources, back.label, destinations, cwd.label, actions, output);
+
+  let choices = [], targets = [], working = false;
+  const ids = () => back.input.value.split(/[\s,]+/).filter(Boolean);
+  const chosen = () => choices.filter(c => c.input.checked).map(c => c.ref);
+  function update() {
+    const ready = ids().length !== 0 || all.input.checked || choices.some(c => c.input.checked);
+    backup.disabled = working || !ready;
+    distribute.disabled = working || !ready || targets.every(c => !c.input.checked);
+    sourceList.hidden = all.input.checked;
+    agents.input.disabled = search.disabled = all.input.checked;
+  }
+  function filter() {
+    const needle = search.value.trim().toLocaleLowerCase();
+    for (const c of choices) {
+      c.label.hidden = !c.text.includes(needle) || (agents.input.value && c.ref.agent !== agents.input.value);
+    }
+  }
+  form.addEventListener("input", update);
+  search.addEventListener("input", filter);
+  agents.input.addEventListener("change", filter);
+  update();
+  api("davsync/session-candidates", {}).then((r) => {
+    choices = r.sources.map(({ agent, id, wsl, title, cwd }) => {
+      const label = [agent, wsl, title || id, cwd].filter(Boolean).join(" · ");
+      const tick = batchTick(label);
+      tick.ref = { agent, id, wsl };
+      tick.text = (label + " " + id).toLocaleLowerCase();
+      return tick;
+    });
+    sourceList.replaceChildren(...choices.map(c => c.label));
+    for (const agent of [...new Set(choices.map(c => c.ref.agent))].sort()) {
+      const option = el("option", "", agent);
+      option.value = agent;
+      agents.input.append(option);
+    }
+    if (!choices.length) {
+      all.input.disabled = true;
+      sourceList.append(el("div", "sub", t("No readable sessions found")));
+    }
+    targets = r.targets.map(agent => {
+      const tick = batchTick(agent === "codex" ? "Codex" : "Claude Code");
+      tick.agent = agent;
+      return tick;
+    });
+    destinations.append(...targets.map(c => c.label));
+    filter();
+    update();
+  }).catch(err => showBatchFailure(output, err.message));
+
+  async function run(importing) {
+    const req = {
+      all: all.input.checked,
+      sources: all.input.checked ? [] : chosen(),
+      backups: ids(),
+      targets: importing ? targets.filter(c => c.input.checked).map(c => c.agent) : [],
+      cwd: importing ? cwd.input.value.trim() : "",
+    };
+    working = true;
+    update();
+    output.replaceChildren();
+    output.classList.remove("bad");
+    try {
+      if ((req.all || req.sources.length) && !await confirmAction(
+        t("Batch session backup and import"),
+        t("The selected conversations may include private source code, prompts and tool output. Each backup is encrypted."),
+        t("Back up"))) return;
+      output.textContent = t("Working…");
+      const result = await api("davsync/session-batch", req);
+      output.replaceChildren();
+      showBatchResult(output, result);
+    } catch (err) {
+      output.replaceChildren();
+      showBatchFailure(output, err.message);
+    } finally {
+      working = false;
+      update();
+    }
+  }
+  backup.onclick = () => run(false);
+  distribute.onclick = () => run(true);
+  return form;
+};
+
+function batchTick(text) {
+  const label = el("label", "tick session-batch-choice"), input = el("input");
+  input.type = "checkbox";
+  label.append(input, el("span", "", text));
+  return { label, input };
+}
+
+function batchField(text, type) {
+  const label = el("label", "session-batch-field"), input = el(type);
+  input.autocomplete = "off";
+  label.append(el("span", "", text), input);
+  return { label, input };
+}
+
+function showBatchFailure(out, error) {
+  out.append(el("div", "bad wraps", t(error)));
+}
+
+function showBatchResult(out, r) {
+  if (r.backup) {
+    const line = el("div", "session-batch-backup");
+    const code = el("code", "", r.backup);
+    const clipboard = el("button", "text", t("Copy"));
+    clipboard.onclick = () => copy(r.backup, clipboard);
+    line.append(el("span", "", t("Session backup ID")), code, clipboard);
+    out.append(line);
+    if (r.remote) out.append(el("div", "", t("Backup available on WebDAV")));
+  }
+  if (r.conversations) out.append(el("div", "", t("{count} conversations · {duplicates} duplicates merged",
+    { count: r.conversations, duplicates: r.duplicates })));
+  for (const item of r.imports || []) {
+    if (item.error) {
+      showBatchFailure(out, item.agent + " · " + item.error);
+      continue;
+    }
+    const line = el("div", "session-batch-result");
+    const code = el("code", "", item.agent + " · " + item.session);
+    const resume = el("button", "text", t("Copy resume command"));
+    resume.onclick = () => copy(item.command, resume);
+    line.append(code);
+    if (item.existing) line.append(el("span", "", t("Reused existing session")));
+    line.append(resume);
+    out.append(line);
+  }
+  if (r.failure) showBatchFailure(out, r.failure);
+}

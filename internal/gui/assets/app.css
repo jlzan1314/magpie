@@ -5817,3 +5817,40 @@ body.linux .action-confirm::backdrop { -webkit-backdrop-filter: none; backdrop-f
 .relay-line.mono { font-family: var(--code); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .relay-line.err, .relay-part.err { color: var(--red); }
 .relay-wait { font-size: 12px; }
+
+.session-batch-form {
+  display: grid;
+  gap: 10px;
+}
+.session-batch-form fieldset {
+  display: grid;
+  gap: 6px;
+  min-inline-size: 0;
+}
+.session-batch-sources {
+  max-block-size: 230px;
+  overflow-y: auto;
+}
+.session-batch-choice > span,
+.session-batch-output code {
+  overflow-wrap: anywhere;
+}
+.session-batch-sources .session-batch-choice {
+  margin-block: 4px;
+}
+.session-batch-form [hidden] {
+  display: none;
+}
+.session-batch-field {
+  display: grid;
+  gap: 4px;
+  min-inline-size: 0;
+}
+.session-batch-form .bar,
+.session-batch-backup,
+.session-batch-result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}

@@ -599,7 +599,7 @@ func writeNew(path string, lines [][]byte) error {
 		return err
 	}
 	if _, err := os.Lstat(path); err == nil {
-		return fmt.Errorf("%s is there already", path)
+		return fmt.Errorf("%s is there already: %w", path, os.ErrExist)
 	}
 	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
@@ -689,11 +689,14 @@ func agentVersion(agent string) string {
 // line naming the one before it as its parent, its fields in Claude Code's
 // order.
 func writeClaudeCarry(cwd string, items []carryItem, now time.Time) (CarryResult, error) {
+	return writeClaudeCarryID(cwd, items, now, uuid.NewString())
+}
+
+func writeClaudeCarryID(cwd string, items []carryItem, now time.Time, id string) (CarryResult, error) {
 	name, err := claudeProjectName(cwd)
 	if err != nil {
 		return CarryResult{}, err
 	}
-	id := uuid.NewString()
 	path := filepath.Join(ClaudeDir(), "projects", name, id+".jsonl")
 	version := agentVersion("claude")
 	if version == "" {
@@ -761,10 +764,7 @@ func writeClaudeCarry(cwd string, items []carryItem, now time.Time) (CarryResult
 				"sourceToolAssistantUUID", by)
 		}
 	}
-	if err := writeNew(path, lines); err != nil {
-		return CarryResult{}, err
-	}
-	return CarryResult{Agent: "claude", ID: id, Path: path}, nil
+	return CarryResult{Agent: "claude", ID: id, Path: path}, writeNew(path, lines)
 }
 
 // ord is a JSON object whose fields are written in the order given, as the
@@ -835,10 +835,12 @@ func writeCodexCarry(home, cwd string, items []carryItem, now time.Time) (CarryR
 	if err != nil {
 		return CarryResult{}, err
 	}
-	id := u.String()
-	local := now.Local()
-	path := filepath.Join(home, "sessions", local.Format("2006"), local.Format("01"), local.Format("02"),
-		"rollout-"+local.Format("2006-01-02T15-04-05")+"-"+id+".jsonl")
+	return writeCodexCarryID(home, cwd, items, now.Local(), u.String())
+}
+
+func writeCodexCarryID(home, cwd string, items []carryItem, now time.Time, id string) (CarryResult, error) {
+	path := filepath.Join(home, "sessions", now.Format("2006"), now.Format("01"), now.Format("02"),
+		"rollout-"+now.Format("2006-01-02T15-04-05")+"-"+id+".jsonl")
 	version := agentVersion("codex")
 	if version == "" {
 		version = "0.0.0"
@@ -893,8 +895,5 @@ func writeCodexCarry(home, cwd string, items []carryItem, now time.Time) (CarryR
 			add(it.Time, "response_item", o("type", "function_call_output", "call_id", callID, "output", out))
 		}
 	}
-	if err := writeNew(path, lines); err != nil {
-		return CarryResult{}, err
-	}
-	return CarryResult{Agent: "codex", ID: id, Path: path}, nil
+	return CarryResult{Agent: "codex", ID: id, Path: path}, writeNew(path, lines)
 }
