@@ -22,7 +22,8 @@ import (
 	"github.com/yetone/magpie/internal/steady"
 )
 
-const batchDir = "session-batches-v1"
+const batchDir = "session-batches-v2"
+const legacyBatchDir = "session-batches-v1"
 const batchPlainLimit = 2 * sessions.MaxBatchConversation
 
 type SessionBatchRequest struct {
@@ -49,6 +50,7 @@ type batchManifest struct {
 type batchStore struct {
 	dav        *dav
 	passphrase string
+	batchID    string
 }
 
 // RunSessionBatch captures selected local sessions and optional earlier
@@ -64,7 +66,7 @@ func RunSessionBatch(ctx context.Context, req SessionBatchRequest) (SessionBatch
 	if err != nil {
 		return result, err
 	}
-	store := batchStore{d, c.Passphrase}
+	store := batchStore{dav: d, passphrase: c.Passphrase}
 	if err := sessions.CheckBatchTargets(req.Targets, strings.TrimSpace(req.Cwd)); err != nil {
 		return result, err
 	}
@@ -103,54 +105,65 @@ func RunSessionBatch(ctx context.Context, req SessionBatchRequest) (SessionBatch
 }
 
 func (s batchStore) save(ctx context.Context, entries []sessions.BatchConversation, publish bool) (string, error) {
-	manifest := batchManifest{Version: 1, Entries: make([]string, 0, len(entries))}
-	writeLocal := func(kind string, value any) (string, error) {
-		raw, err := json.Marshal(value)
-		if err != nil {
-			return "", err
-		}
-		id := batchDigest(raw)
-		if _, err := s.keepLocal(kind, id, raw); err != nil {
-			return "", err
-		}
-		return id, nil
-	}
+	manifest := batchManifest{Version: 2, Entries: make([]string, 0, len(entries))}
 	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		id, err := writeLocal("conversations", entry)
+		raw, err := json.Marshal(entry)
 		if err != nil {
 			return "", err
 		}
-		manifest.Entries = append(manifest.Entries, id)
+		manifest.Entries = append(manifest.Entries, batchDigest(raw))
 	}
-	batchID, err := writeLocal("backups", manifest)
+	manifestData, err := json.Marshal(manifest)
 	if err != nil {
 		return "", err
 	}
-	if !publish {
-		return batchID, nil
+	s.batchID = batchDigest(manifestData)
+	for i, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		raw, err := json.Marshal(entry)
+		if err != nil {
+			return "", err
+		}
+		if _, err := s.keepLocal("conversations", manifest.Entries[i], raw); err != nil {
+			return "", err
+		}
 	}
-	for _, dirs := range [][]string{{folder}, {folder, batchDir}, {folder, batchDir, "conversations"}, {folder, batchDir, "backups"}} {
+	if _, err := s.keepLocal("backups", s.batchID, manifestData); err != nil {
+		return "", err
+	}
+	if !publish {
+		return s.batchID, nil
+	}
+	for _, dirs := range [][]string{{folder}, {folder, batchDir}, {folder, batchDir, s.batchID}} {
 		if err := s.dav.ensureSessionCollection(ctx, dirs); err != nil {
-			return batchID, err
+			return s.batchID, err
 		}
 	}
 	for _, id := range manifest.Entries {
 		if err := s.publish(ctx, "conversations", id); err != nil {
-			return batchID, err
+			return s.batchID, err
 		}
 	}
-	return batchID, s.publish(ctx, "backups", batchID)
+	return s.batchID, s.publish(ctx, "backups", s.batchID)
 }
 
+var errSessionBackupMissing = errors.New("session backup was not found")
+
 func (s batchStore) load(ctx context.Context, id string) ([]sessions.BatchConversation, error) {
+	s.batchID = id
 	var manifest batchManifest
-	if err := s.loadObject(ctx, "backups", id, &manifest); err != nil {
+	err := s.loadObject(ctx, "backups", id, &manifest)
+	version := 2
+	if errors.Is(err, errSessionBackupMissing) {
+		s.batchID, version = "", 1
+		err = s.loadObject(ctx, "backups", id, &manifest)
+	}
+	if err != nil {
 		return nil, err
 	}
-	if manifest.Version != 1 || len(manifest.Entries) == 0 {
+	if manifest.Version != version || len(manifest.Entries) == 0 {
 		return nil, errors.New("invalid session backup manifest")
 	}
 	out := make([]sessions.BatchConversation, 0, len(manifest.Entries))
@@ -180,12 +193,22 @@ func validBatchID(id string) bool {
 	return err == nil
 }
 
+func (s batchStore) objectPath(kind, id string) []string {
+	if s.batchID == "" {
+		return []string{legacyBatchDir, kind, id + ".sealed"}
+	}
+	if kind == "backups" {
+		return []string{batchDir, s.batchID, "manifest.sealed"}
+	}
+	return []string{batchDir, s.batchID, id + ".sealed"}
+}
+
 func (s batchStore) filename(kind, id string) string {
-	return filepath.Join(settings.Dir(), batchDir, kind, id+".sealed")
+	return filepath.Join(append([]string{settings.Dir()}, s.objectPath(kind, id)...)...)
 }
 
 func (s batchStore) url(kind, id string) string {
-	return s.dav.url(folder, batchDir, kind, id+".sealed")
+	return s.dav.url(append([]string{folder}, s.objectPath(kind, id)...)...)
 }
 
 func (s batchStore) keepLocal(kind, id string, plain []byte) ([]byte, error) {
@@ -290,7 +313,11 @@ func (s batchStore) remote(ctx context.Context, kind, id string) ([]byte, error)
 		return nil, err
 	}
 	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
+	switch res.StatusCode {
+	case http.StatusNotFound, http.StatusGone, http.StatusConflict:
+		return nil, errSessionBackupMissing
+	case http.StatusOK:
+	default:
 		return nil, fmt.Errorf("reading session backup from WebDAV: HTTP %d", res.StatusCode)
 	}
 	return readBatchLimited(res.Body)

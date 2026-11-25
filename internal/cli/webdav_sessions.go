@@ -17,11 +17,21 @@ func webdavSessionCmd(args []string) error {
 	if len(args) == 1 && args[0] == "list" {
 		return json.NewEncoder(os.Stdout).Encode(sessions.BatchCandidates())
 	}
+	if len(args) == 1 && args[0] == "backups" {
+		out, err := davsync.ListSessionBackups(context.Background())
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(out)
+	}
+	if len(args) == 3 && args[0] == "delete" {
+		return davsync.DeleteSessionBackup(context.Background(), args[1], args[2])
+	}
 	if len(args) != 0 && args[0] == "batch" {
 		return webdavSessionBatch(args[1:])
 	}
 	if len(args) != 2 {
-		return errors.New("usage: magpie webdav sessions list | batch [options] | push|pull <Codex session ID>")
+		return errors.New("usage: magpie webdav sessions list | backups | delete <id> local|webdav | batch [options] | push|pull <Codex session ID>")
 	}
 	res, err := davsync.TransferCodexSession(context.Background(), args[0], args[1])
 	if err != nil {

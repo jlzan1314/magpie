@@ -273,8 +273,17 @@ the backup its ID. For a two-way WebDAV computer, the conversation objects
 are published and verified before the manifest. A computer following the
 server can merge or import a batch with a local backup and can read existing
 WebDAV backups. Find the local objects in Magpie's
-`session-batches-v1` config subfolder and the remote objects under
-`magpie/session-batches-v1`.
+`session-batches-v2` config subfolder and the remote objects under
+`magpie/session-batches-v2`. Every backup owns its compressed conversation
+files, and a single backup can be removed independently.
+
+**Manage session backups** lists the local and WebDAV copies and lets you
+delete either copy explicitly. WebDAV deletion is available to computers
+that sync both ways. It removes the backup from the server for every
+device; another device can still have a local copy. Deleting a backup
+leaves native Agent sessions intact. Earlier v1 manifests remain readable
+and can be deleted, while their shared conversation objects are kept for
+other v1 manifests.
 
 Native import runs after backup, into the chosen Codex and Claude Code
 stores in parallel. Each target returns its new session ID and resume
@@ -285,6 +294,9 @@ be retried from the backup ID.
 
 ```sh
 magpie webdav sessions list
+magpie webdav sessions backups
+magpie webdav sessions delete <backup-id> local
+magpie webdav sessions delete <backup-id> webdav
 magpie webdav sessions batch --all --to codex,claude
 magpie webdav sessions batch --source codex:<id> --source opencode:<id>
 magpie webdav sessions batch --backup <backup-id> --to codex,claude --cwd /path/to/project

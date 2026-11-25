@@ -569,6 +569,7 @@ window.askPreviewRows = function (at, v, sub) {
     r.append(who, val);
     at.append(r);
   };
+  if (v.kind === "webdav") sessionTransferRows(at, v, row);
   const peek = el("button", "text", t("Preview…"));
   peek.onclick = async () => {
     peek.classList.add("busy");
@@ -582,6 +583,25 @@ window.askPreviewRows = function (at, v, sub) {
     row(t("Undo the last sync"), t("It brought {parts} here {when}. Undo puts back what was here before, on this computer only.", { parts: syncParts(v.applied.parts), when: syncWhen(v.applied.at) }), undo, "sync-undo-row");
   }
 };
+
+function sessionTransferRows(at, v, row) {
+  const cards = [
+    ["Batch session backup and import", "Merge selected conversations, back them up, and import into the agents you choose.", window.sessionBatchForm],
+    ["Codex session transfer", "Transfer one compressed and encrypted conversation by ID.", () => window.codexSessionForm(!!v.followServer)],
+  ];
+  for (const [title, subtitle, form] of cards) {
+    const button = el("button", "text", t("Open"));
+    const panel = el("div");
+    button.type = "button";
+    button.onclick = () => {
+      if (panel.firstChild) panel.replaceChildren();
+      else panel.append(form());
+      button.textContent = t(panel.firstChild ? "Close" : "Open");
+    };
+    row(t(title), t(subtitle), button, "sync-session-row");
+    at.append(panel);
+  }
+}
 
 window.codexSessionForm = function (followsServer) {
   const form = el("div", "editor sync-form");
@@ -646,7 +666,11 @@ window.sessionBatchForm = function () {
   output.setAttribute("role", "status");
   const actions = el("div", "bar");
   actions.append(backup, distribute);
-  form.append(sources, back.label, destinations, cwd.label, actions, output);
+  form.append(sources, back.label, destinations, cwd.label, actions, output,
+    sessionBackupManager(id => {
+      back.input.value = [back.input.value.trim(), id].filter(Boolean).join("\n");
+      update();
+    }));
 
   let choices = [], targets = [], working = false;
   const ids = () => back.input.value.split(/[\s,]+/).filter(Boolean);
@@ -775,4 +799,67 @@ function showBatchResult(out, r) {
     out.append(line);
   }
   if (r.failure) showBatchFailure(out, r.failure);
+}
+
+function sessionBackupManager(use) {
+  const box = el("details", "session-batch-manager");
+  const list = el("div", "sub wraps");
+  const refresh = el("button", "text", t("Refresh"));
+  refresh.type = "button";
+  box.append(el("summary", "", t("Manage session backups")), refresh, list);
+
+  async function remove(id, scope) {
+    const where = scope === "local" ? t("Delete local backup") : t("Delete WebDAV backup");
+    const text = scope === "local" ? t("Delete this backup on this computer? Imported Agent sessions will stay.") :
+      t("Delete this backup from WebDAV for every device? Local copies and imported Agent sessions will stay.");
+    if (!await confirmAction(where, text, where)) return;
+    try {
+      await api("davsync/session-backup-delete", { id, scope });
+      await load();
+    } catch (e) {
+      showBatchFailure(list, e.message);
+    }
+  }
+
+  async function load() {
+    refresh.disabled = true;
+    list.replaceChildren(el("div", "", t("Working…")));
+    try {
+      const state = await api("davsync/session-backups", {});
+      list.replaceChildren();
+      if (!state.items.length) list.append(el("div", "", t("No session backups")));
+      for (const item of state.items) {
+        const row = el("div", "session-batch-backup");
+        row.append(el("code", "", item.id));
+        if (item.updated) row.append(el("span", "", new Date(item.updated).toLocaleString()));
+        const pick = el("button", "text", t("Use backup"));
+        pick.type = "button";
+        pick.onclick = () => use(item.id);
+        row.append(pick);
+        if (item.local) {
+          const local = el("button", "text", t("Delete local backup"));
+          local.type = "button";
+          local.onclick = () => remove(item.id, "local");
+          row.append(local);
+        }
+        if (item.webdav && state.canDeleteWebDAV) {
+          const webdav = el("button", "text", t("Delete WebDAV backup"));
+          webdav.type = "button";
+          webdav.onclick = () => remove(item.id, "webdav");
+          row.append(webdav);
+        }
+        list.append(row);
+      }
+      if (state.webdavError) showBatchFailure(list, state.webdavError);
+    } catch (e) {
+      list.replaceChildren();
+      showBatchFailure(list, e.message);
+    } finally {
+      refresh.disabled = false;
+    }
+  }
+
+  refresh.onclick = load;
+  box.ontoggle = () => { if (box.open) load(); };
+  return box;
 }

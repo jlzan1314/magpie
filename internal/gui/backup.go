@@ -228,6 +228,26 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 		case "session-candidates":
 			writeJSON(rw, map[string]any{"sources": sessions.BatchCandidates(), "targets": sessions.BatchImportTargets()})
 			return
+		case "session-backups":
+			out, err := davsync.ListSessionBackups(ctx)
+			if err != nil {
+				fail(rw, err)
+				return
+			}
+			writeJSON(rw, out)
+			return
+		case "session-backup-delete":
+			var in struct{ ID, Scope string }
+			if err := json.NewDecoder(http.MaxBytesReader(rw, r.Body, 4096)).Decode(&in); err != nil {
+				fail(rw, err)
+				return
+			}
+			if err := davsync.DeleteSessionBackup(ctx, in.ID, in.Scope); err != nil {
+				fail(rw, err)
+				return
+			}
+			writeJSON(rw, map[string]bool{"deleted": true})
+			return
 		case "session-batch":
 			var in davsync.SessionBatchRequest
 			if err = json.NewDecoder(http.MaxBytesReader(rw, r.Body, 1<<20)).Decode(&in); err != nil {
