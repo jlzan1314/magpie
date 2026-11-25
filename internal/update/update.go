@@ -213,12 +213,11 @@ func latestFrom(ctx context.Context, feed, lang string) (*Release, error) {
 	return &r, nil
 }
 
-// Released reports whether v is a release version rather than a build from
-// source ("dev", "0bcb2cc-dirty", git describe's "v0.1.0-3-g0bcb2cc");
-// only releases update themselves.
+// Released reports whether v is eligible for upstream updates. Source
+// builds and builds marked with the -clive suffix update manually.
 func Released(v string) bool {
 	s := parse(v)
-	return s != nil && !describe.MatchString(s.pre) && !strings.Contains(s.pre, "dirty")
+	return s != nil && s.pre != "clive" && !describe.MatchString(s.pre) && !strings.Contains(s.pre, "dirty")
 }
 
 // describe matches what git describe adds after a tag: commits since, hash.

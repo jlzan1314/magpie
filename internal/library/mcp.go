@@ -352,6 +352,11 @@ const (
 	// streamable HTTP and no way to name SSE (TRAE CN 2.3.105403's
 	// workbench)
 	fmtTrae
+	// fmtMcporter is MCPorter's mcporter.json(c) (JSONC): mcpServers of
+	// command/args/env or baseUrl/headers with no transport field (tries
+	// streamable HTTP and falls back to SSE automatically;
+	// github.com/openclaw/mcporter config-normalize.js, runtime/transport.js)
+	fmtMcporter
 )
 
 // mcpFile is the file an agent keeps its user-wide MCP servers in.
@@ -861,6 +866,14 @@ func (f *mcpFile) encode(s *Server) ordered {
 			add("args", list(s.Args))
 			optional("env", s.Env)
 		}
+	case fmtMcporter:
+		if s.Remote() {
+			add("baseUrl", s.URL)
+			optional("headers", s.Headers)
+		} else {
+			add("command", append([]string{s.Command}, s.Args...))
+			optional("env", s.Env)
+		}
 	case fmtLiveAgent:
 		// as LiveAgent's own MCP settings save one (K-brain's LiveServer,
 		// internal/mcp/live.go): on, stdio or http, args, env and headers
@@ -1172,6 +1185,36 @@ func (f *mcpFile) decode(name string, m map[string]any) (*Server, bool) {
 			remote("http", u, m["headers"])
 		} else {
 			local(str(m, "command"), m["args"], m["env"])
+		}
+	case fmtMcporter:
+		// MCPorter accepts baseUrl/base_url/url/serverUrl/server_url for remote
+		// servers, headers plus bearerToken/bearerTokenEnv aliases, and stdio
+		// command as string, quoted command string, string array, or executable.
+		u := firstStr(m, "baseUrl", "base_url", "url", "serverUrl", "server_url")
+		if u != "" {
+			remote("http", u, m["headers"])
+			if len(s.Headers) > 0 {
+				s.Headers = normalizeMcporterEnvMap(s.Headers)
+			}
+			if bt := firstStr(m, "bearerToken", "bearer_token"); bt != "" {
+				if s.Headers == nil {
+					s.Headers = map[string]string{}
+				}
+				s.Headers["Authorization"] = "Bearer " + normalizeMcporterEnv(bt)
+			}
+			if envName := firstStr(m, "bearerTokenEnv", "bearer_token_env"); envName != "" {
+				if s.Headers == nil {
+					s.Headers = map[string]string{}
+				}
+				s.Headers["Authorization"] = "${" + envName + "}"
+			}
+		} else {
+			cmd, args := decodeMcporterCommand(m)
+			cmd = normalizeMcporterEnv(cmd)
+			for i, arg := range args {
+				args[i] = normalizeMcporterEnv(arg)
+			}
+			s.Transport, s.Command, s.Args, s.Env = "stdio", cmd, args, normalizeMcporterEnvMap(strMap(m["env"]))
 		}
 	case fmtOpenClaw:
 		// streamable HTTP when the transport (or the type alias `openclaw
@@ -1493,6 +1536,10 @@ var owned = map[mcpFormat][]string{
 	// cwd, oauth, disabled and fromGalleryId are the user's (TRAE CN's
 	// own entries); a transport names nothing TRAE CN reads
 	fmtTrae: {"transport", "url", "headers", "command", "args", "env"},
+	// description, cwd, auth, tokenCacheDir, clientName, oauth*, lifecycle,
+	// logging, allowedTools and blockedTools are the user's
+	fmtMcporter: {"baseUrl", "base_url", "url", "serverUrl", "server_url", "headers",
+		"bearerToken", "bearer_token", "bearerTokenEnv", "bearer_token_env", "command", "executable", "args", "env"},
 	// enabled, and the id's description, docsUrl, cwd, timeoutMs,
 	// workspaceRoots, policy and auth, are the user's
 	fmtLiveAgent: {"transport", "url", "headers", "command", "args", "env"},
@@ -1551,8 +1598,107 @@ func (f *mcpFile) current(name string, m map[string]any, s *Server) (*Server, bo
 		if !cur.Remote() {
 			cur.Env = keep(cur.Env, "envs")
 		}
+	case fmtMcporter:
+		// MCPorter writes no transport field for remote URLs and auto-falls
+		// back from streamable HTTP to SSE, so an SSE library entry matches a
+		// decoded remote entry.
+		if s.Transport == "sse" && cur.Transport == "http" {
+			cur.Transport = "sse"
+		}
 	}
 	return cur, true
+}
+
+func firstStr(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v := str(m, k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func normalizeMcporterEnv(v string) string {
+	if rest, ok := strings.CutPrefix(v, "$env:"); ok && rest != "" {
+		return "${" + rest + "}"
+	}
+	return v
+}
+
+func normalizeMcporterEnvMap(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return m
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = normalizeMcporterEnv(v)
+	}
+	return out
+}
+
+func decodeMcporterCommand(m map[string]any) (string, []string) {
+	if parts := strList(m["command"]); len(parts) > 0 {
+		return parts[0], parts[1:]
+	}
+	cmd := str(m, "command")
+	if cmd == "" {
+		cmd = str(m, "executable")
+	}
+	if cmd == "" {
+		return "", nil
+	}
+	args := strList(m["args"])
+	if len(args) > 0 {
+		return cmd, args
+	}
+	tokens := splitMcporterCommand(cmd)
+	if len(tokens) == 0 {
+		return "", nil
+	}
+	if len(tokens) == 1 {
+		return tokens[0], nil
+	}
+	return tokens[0], tokens[1:]
+}
+
+func splitMcporterCommand(value string) []string {
+	var result []string
+	var current strings.Builder
+	inSingle, inDouble, escapeNext := false, false, false
+	for _, ch := range strings.TrimSpace(value) {
+		if escapeNext {
+			current.WriteRune(ch)
+			escapeNext = false
+			continue
+		}
+		if ch == '\\' {
+			escapeNext = true
+			continue
+		}
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+		if ch == ' ' && !inSingle && !inDouble {
+			if current.Len() > 0 {
+				result = append(result, current.String())
+				current.Reset()
+			}
+			continue
+		}
+		current.WriteRune(ch)
+	}
+	if escapeNext {
+		current.WriteByte('\\')
+	}
+	if current.Len() > 0 {
+		result = append(result, current.String())
+	}
+	return result
 }
 
 // merged is the entry magpie writes, with what the user added to the old

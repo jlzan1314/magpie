@@ -137,6 +137,8 @@ var Vars = []string{
 	"PI_DESKTOP_DATA_DIR",
 	// Mister Morph's config file
 	"MISTER_MORPH_CONFIG",
+	// MCPorter's config file
+	"MCPORTER_CONFIG",
 	// T3 Code's base folder (its settings in userdata/)
 	"T3CODE_HOME",
 	// AtomCode's config folder

@@ -26,6 +26,7 @@ const libraryUsage = `magpie library                     what the library gives 
                                      idle= is how long a server magpie runs (the router's, Codex's) is kept unused, never to keep it
   magpie library mcp show <name>     print the server as the library keeps it, as JSON
   magpie library mcp agents <name> <a,b…|none>
+  magpie library mcp import <name…>|--all [--from=<agent>]   bring servers found in agents' own configs (e.g. mcporter) into the library
   magpie library mcp local <name> on|off   keep it to this computer: a sync or a backup never carries it, and one
                                      coming in neither takes it away nor puts another computer's in its place
   magpie library mcp here <name> <command args…> | off   start a synced server with this command on this computer alone,
@@ -203,6 +204,10 @@ func libraryCmd(args []string) error {
 		case len(rest) == 2 && (rest[0] == "on" || rest[0] == "off") && !strings.HasPrefix(rest[1], "-"):
 			// off for everyone, kept with its settings; on again as it was
 			res, err = library.ServerOn(rest[1], rest[0] == "on")
+		case len(rest) >= 2 && rest[0] == "import":
+			if res, err = importMCPServers(rest[1:]); res == nil && err == nil {
+				return nil
+			}
 		case len(rest) == 2 && rest[0] == "rm":
 			res, err = library.RemoveServer(rest[1])
 		case len(rest) == 2 && (rest[0] == "router" || rest[0] == "hub") && (rest[1] == "on" || rest[1] == "off"):
@@ -435,6 +440,65 @@ func removeGoneSkills(args []string) (*library.Result, error) {
 	return res, nil
 }
 
+// importMCPServers is `magpie library mcp import <name…>|--all [--from=<agent>]`.
+func importMCPServers(args []string) (*library.Result, error) {
+	var all bool
+	var from string
+	var names []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--all":
+			all = true
+		case strings.HasPrefix(a, "--from=") || strings.HasPrefix(a, "from="):
+			_, value, _ := strings.Cut(a, "=")
+			from = strings.TrimSpace(value)
+			if from == "" {
+				return nil, fmt.Errorf("--from needs an MCP target")
+			}
+		case a == "--from" && i+1 < len(args):
+			i++
+			from = strings.TrimSpace(args[i])
+			if from == "" || strings.HasPrefix(from, "-") {
+				return nil, fmt.Errorf("--from needs an MCP target")
+			}
+		case strings.HasPrefix(a, "-"):
+			return nil, fmt.Errorf("usage:\n  %s", libraryUsage)
+		default:
+			names = append(names, a)
+		}
+	}
+	if from != "" {
+		id, err := library.Takes(from, "mcp")
+		if err != nil {
+			return nil, err
+		}
+		from = id
+		if len(names) == 0 {
+			all = true
+		}
+	}
+	if all && len(names) > 0 || (!all && len(names) == 0) {
+		return nil, fmt.Errorf("usage:\n  %s", libraryUsage)
+	}
+	imported, result, err := library.ImportServers(names, from)
+	if err != nil {
+		return nil, err
+	}
+	if len(imported) == 0 {
+		if from == "" {
+			from = "any agent"
+		}
+		fmt.Println(green.Render("✓"), "no unimported MCP servers found in", from)
+		return nil, nil
+	}
+	fmt.Println(green.Render("✓"), "imported", plural(len(imported), "MCP server")+":", strings.Join(imported, ", "))
+	if len(result.Changed) == 0 && len(result.Problems) == 0 && result.Backup == "" {
+		return nil, nil
+	}
+	return result, nil
+}
+
 // agentList is a comma list of agents; none (or nothing) is no agent.
 func agentList(s string) []string {
 	out := []string{}
@@ -585,6 +649,7 @@ func libraryStatus() error {
 	}
 	if len(found) > 0 {
 		fmt.Println(" ", muted.Render("in your agents, not in the library:"), strings.Join(found, ", "))
+		fmt.Println("   ", muted.Render("bring them in: magpie library mcp import <name…> | --all [--from=<agent>]"))
 	}
 	if len(own) > 0 {
 		fmt.Println(" ", muted.Render("added by the agent itself, left as they are:"), strings.Join(own, ", "))

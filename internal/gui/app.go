@@ -495,6 +495,7 @@ func Run(version string, showMain bool, link string) error {
 	// set menu becomes a menu bar in every window, the panel's too.
 	if runtime.GOOS == "darwin" {
 		appMenu := application.DefaultApplicationMenu()
+		setNativeAboutVersion(appMenu, version)
 		help := appMenu.FindByRole(application.HelpMenu).GetSubmenu()
 		help.Clear()
 		help.Add("Learn More").OnClick(func(*application.Context) { _ = h.OpenURL("https://usemagpie.ai") })

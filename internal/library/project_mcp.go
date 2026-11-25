@@ -65,6 +65,7 @@ var projectMCPFiles = map[string]struct {
 	"codebuddy": {".mcp.json", fmtClaude},
 	"droid":     {".factory/mcp.json", fmtClaude},
 	"trae-cn":   {".trae/mcp.json", fmtTrae},
+	"mcporter":  {"config/mcporter.json", fmtMcporter},
 	// one file for both, as their user-wide one is
 	"agy":         {".agents/mcp_config.json", fmtAntigravity},
 	"antigravity": {".agents/mcp_config.json", fmtAntigravity},
