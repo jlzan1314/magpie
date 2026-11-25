@@ -248,6 +248,84 @@ it does, and take it back.
   Settings → Sync → Undo the last sync, `magpie <kind> undo-sync`.
   Restore's Undo (`davsync/undo`) is unchanged: it undoes a Restore.
 
+## Backing up and importing selected sessions
+
+In **Settings → Sync and backup → Batch session backup and import**, select
+individual sessions or **All readable sessions**. The picker uses the same
+native transcript readers and session access choices as Sessions. A
+conversation from an unavailable reader cannot be selected. A blank
+conversation is skipped when selecting all. Enter existing backup IDs to
+merge earlier snapshots with the selection, and choose one or more import
+targets.
+
+The batch keeps one copy of identical transcripts across agents and retains
+their source references. A longer transcript replaces its own shorter
+revision when they share a source and agree through the last recorded
+part. Divergent copies remain separate. The portable records contain
+conversation text and readable tool items. Cross-agent import replays that
+context in the destination format. Native provider state and hidden
+reasoning are outside the portable records.
+
+[RunSessionBatch](../../internal/davsync/session_batches.go) writes a local
+backup first. Each merged conversation is gzipped, encrypted with the
+existing sync passphrase and saved as a separate object. A manifest gives
+the backup its ID. For a two-way WebDAV computer, the conversation objects
+are published and verified before the manifest. A computer following the
+server can merge or import a batch with a local backup and can read existing
+WebDAV backups. Find the local objects in Magpie's
+`session-batches-v1` config subfolder and the remote objects under
+`magpie/session-batches-v1`.
+
+Native import runs after backup, into the chosen Codex and Claude Code
+stores in parallel. Each target returns its new session ID and resume
+command. An identical session already in the target project is reused when
+Magpie can read it. A repeated import also reuses its earlier native session. Supply a target project folder
+when the source folder is unavailable on the recipient. A failed import can
+be retried from the backup ID.
+
+```sh
+magpie webdav sessions list
+magpie webdav sessions batch --all --to codex,claude
+magpie webdav sessions batch --source codex:<id> --source opencode:<id>
+magpie webdav sessions batch --backup <backup-id> --to codex,claude --cwd /path/to/project
+```
+
+Verification: `TestSessionBatch` covers native source selection, exact and
+append-only merge, divergent copies, separately encrypted backup objects,
+distribution to both agents, and repeated import.
+
+## Transferring a Codex session over WebDAV
+
+Settings → Sync → Codex session transfer and
+`magpie webdav sessions push <session-id>` send a selected Codex conversation
+from the current `CODEX_HOME`. Use the same account and sync passphrase on
+another computer and run `magpie webdav sessions pull <session-id>` or choose
+Download in the same panel. Resume it there with `codex resume <session-id>`
+from the corresponding project. The conversation keeps its ID and native
+rollout records. The project files and the Codex account are outside the
+transfer.
+
+Each session has its own `magpie/sessions-v1/codex/<id>.magpie-session`
+WebDAV object, separate from the setup file. Magpie compresses the native
+JSONL rollouts with gzip and seals them with the existing sync passphrase
+using [SealData](../../internal/backup/data.go). The server sees the UUID in
+the file name. Conversation records can contain code, prompts and tool output,
+so sending one requires an explicit choice. Setup sync's timer does not
+transfer conversations. A computer following the server can download.
+
+[TransferCodexSession](../../internal/davsync/sessions.go) permits an
+identical copy or an append-only update. A divergence leaves both copies
+available. WebDAV writes use conditional requests and verify the resulting
+object. [ImportCodexSnapshot](../../internal/sessions/codex_sync.go) verifies
+paths, session identity, and size before writing under Codex's thread lock.
+It replaces each rollout atomically and leaves identical rollouts alone on a
+retry. This transfers active Codex rollouts, including locally compressed
+ones, with up to 64 MiB of uncompressed rollout data per session.
+
+Verification: `TestWebDAVCodexSessionTransfer` covers a compressed,
+encrypted round trip into a second home, an append, a re-download, and
+refusal to replace divergent native history.
+
 ## Backups by themselves
 
 [`auto.go`](../../internal/backup/auto.go) writes the setup into a folder on

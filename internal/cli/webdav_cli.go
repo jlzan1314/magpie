@@ -30,6 +30,10 @@ const webdavUsage = `usage:
                                           library, memory, usage, sign-ins (yes|no);
                                           password= and passphrase= ask for a new one
   magpie webdav now                       sync now (the gateway also syncs by itself while it runs: see auto)
+  magpie webdav sessions list             list the readable session sources
+  magpie webdav sessions batch [--all | --source agent:id] [--backup id] [--to codex,claude] [--cwd path]
+                                          merge selected source sessions or backups, save, and optionally import
+  magpie webdav sessions push|pull <id>   transfer one compressed, encrypted Codex session by its UUID
   magpie webdav preview                   what syncing now would change, here and on the server; nothing is changed
   magpie webdav undo-sync [anyway]        put back what the last sync brought in, on this computer only
   magpie webdav auto off|3|15|30|60       how often the gateway syncs by itself, in minutes; off: only when asked
@@ -187,7 +191,12 @@ func (k syncKind) turnOn() string {
 }
 
 // webdavCmd is magpie webdav ….
-func webdavCmd(args []string) error { return syncCmd(webdavKind, args) }
+func webdavCmd(args []string) error {
+	if len(args) > 0 && args[0] == "sessions" {
+		return webdavSessionCmd(args[1:])
+	}
+	return syncCmd(webdavKind, args)
+}
 
 // s3Cmd is magpie s3 ….
 func s3Cmd(args []string) error { return syncCmd(s3Kind, args) }

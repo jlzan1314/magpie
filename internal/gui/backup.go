@@ -16,6 +16,7 @@ import (
 	"github.com/yetone/magpie/internal/davsync"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/sessions"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -224,6 +225,38 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 			err = busy(davsync.SyncNow(ctx)) // how it went is in the status
 		case "now":
 			err = busy(davsync.SyncNow(ctx))
+		case "session-candidates":
+			writeJSON(rw, map[string]any{"sources": sessions.BatchCandidates(), "targets": sessions.BatchImportTargets()})
+			return
+		case "session-batch":
+			var in davsync.SessionBatchRequest
+			if err = json.NewDecoder(http.MaxBytesReader(rw, r.Body, 1<<20)).Decode(&in); err != nil {
+				fail(rw, err)
+				return
+			}
+			result, err := davsync.RunSessionBatch(ctx, in)
+			out := struct {
+				davsync.SessionBatchResult
+				Failure string `json:"failure,omitempty"`
+			}{SessionBatchResult: result}
+			if err != nil {
+				out.Failure = err.Error()
+			}
+			writeJSON(rw, out)
+			return
+		case "session":
+			var in struct{ Action, ID string }
+			if err = json.NewDecoder(http.MaxBytesReader(rw, r.Body, 4096)).Decode(&in); err != nil {
+				fail(rw, err)
+				return
+			}
+			result, err := davsync.TransferCodexSession(ctx, in.Action, in.ID)
+			if err != nil {
+				fail(rw, err)
+				return
+			}
+			writeJSON(rw, result)
+			return
 		case "preview": // what syncing would do (#6428): the setup saved, or the form's when one is sent
 			var in struct{ Form *davsync.Config }
 			var p davsync.Plan

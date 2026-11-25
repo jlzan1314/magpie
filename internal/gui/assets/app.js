@@ -20595,7 +20595,7 @@ function renderLangPick(s, keep) {
 // renderSync: the Settings page's sync and backup — a remote keeping the
 // setup the same on every computer, and a sealed file to carry by hand.
 // One of the three opens a form below its row at a time.
-let syncOpen = ""; // "dav" | "export" | "import"
+let syncOpen = ""; // "dav" | "export" | "import" | "sessions" | "session-batch"
 const syncNames = { webdav: "WebDAV", s3: "S3", github: "GitHub" };
 function syncServers(v) {
   const servers = { ...v.servers };
@@ -20693,6 +20693,14 @@ async function renderSync(v) {
     box.append(r);
   }
   if (syncOpen === "dav") box.append(syncFile("davForm", v));
+  if (v.on && !s3 && !github) {
+    row(t("Batch session backup and import"), t("Merge selected conversations, back them up, and import into the agents you choose."),
+      btn(t(syncOpen === "session-batch" ? "Close" : "Open"), toggle("session-batch")));
+    if (syncOpen === "session-batch") box.append(syncFile("sessionBatchForm"));
+    row(t("Codex session transfer"), t("Transfer one compressed and encrypted conversation by ID."),
+      btn(t(syncOpen === "sessions" ? "Close" : "Open"), toggle("sessions")));
+    if (syncOpen === "sessions") box.append(syncFile("codexSessionForm", !!v.followServer));
+  }
   if (v.on) {
     // the parts left out of sync, Preview a sync and Undo the last sync
     // (#6428), in syncfiles.js
