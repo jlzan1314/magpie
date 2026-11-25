@@ -31,6 +31,9 @@ const webdavUsage = `usage:
                                           password= and passphrase= ask for a new one
   magpie webdav now                       sync now (the gateway also syncs by itself while it runs: see auto)
   magpie webdav sessions list             list the readable session sources
+  magpie webdav sessions backups          list local and WebDAV session backups
+  magpie webdav sessions delete <id> local|webdav
+                                          delete one backup from the chosen place
   magpie webdav sessions batch [--all | --source agent:id] [--backup id] [--to codex,claude] [--cwd path]
                                           merge selected source sessions or backups, save, and optionally import
   magpie webdav sessions push|pull <id>   transfer one compressed, encrypted Codex session by its UUID

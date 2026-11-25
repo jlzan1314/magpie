@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -25,8 +27,50 @@ func TestSessionBatch(t *testing.T) {
 	fake := &fakeDAV{files: map[string][]byte{}, etags: map[string]string{}, dirs: map[string]bool{"/dav": true}}
 	var publishFailure atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if publishFailure.Load() && r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/backups/") {
+		if publishFailure.Load() && r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/manifest.sealed") {
 			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		if r.Method == "PROPFIND" || r.Method == http.MethodDelete {
+			fake.mu.Lock()
+			defer fake.mu.Unlock()
+			parent := strings.TrimSuffix(r.URL.Path, "/")
+			if r.Method == "PROPFIND" {
+				if !fake.dirs[parent] {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.WriteHeader(http.StatusMultiStatus)
+				fmt.Fprint(w, `<multistatus xmlns="DAV:">`)
+				write := func(p string) {
+					fmt.Fprint(w, "<response><href>")
+					_ = xml.EscapeText(w, []byte(p))
+					fmt.Fprint(w, "</href></response>")
+				}
+				for d := range fake.dirs {
+					if pathpkg.Dir(d) == parent {
+						write(d + "/")
+					}
+				}
+				for name := range fake.files {
+					if pathpkg.Dir(name) == parent {
+						write(name)
+					}
+				}
+				fmt.Fprint(w, "</multistatus>")
+				return
+			}
+			for file := range fake.files {
+				if file == parent || strings.HasPrefix(file, parent+"/") {
+					delete(fake.files, file)
+				}
+			}
+			for d := range fake.dirs {
+				if d == parent || strings.HasPrefix(d, parent+"/") {
+					delete(fake.dirs, d)
+				}
+			}
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		fake.ServeHTTP(w, r)
@@ -163,4 +207,46 @@ func TestSessionBatch(t *testing.T) {
 			t.Fatalf("repeat created a duplicate: %+v", item)
 		}
 	}
+	check := func(id string, local, remote bool) {
+		t.Helper()
+		list, err := ListSessionBackups(ctx)
+		if err != nil || list.WebDAVError != "" {
+			t.Fatalf("backup list %+v, %v", list, err)
+		}
+		for _, b := range list.Items {
+			if b.ID == id {
+				if b.Local != local || b.WebDAV != remote {
+					t.Fatalf("backup scope %+v", b)
+				}
+				return
+			}
+		}
+		t.Fatalf("missing backup %s", id)
+	}
+	check(third.Backup, true, true)
+	if err := DeleteSessionBackup(ctx, third.Backup, "webdav"); err == nil {
+		t.Fatal("follower deleted server backup")
+	}
+	if err := DeleteSessionBackup(ctx, third.Backup, "local"); err != nil {
+		t.Fatal(err)
+	}
+	check(third.Backup, false, true)
+	for _, item := range targets.Imports {
+		if _, ok := sessions.Find(item.Agent, item.Session); !ok {
+			t.Fatalf("deleting a backup removed a native session: %+v", item)
+		}
+	}
+	useHome(from)
+	if err := DeleteSessionBackup(ctx, third.Backup, "webdav"); err != nil {
+		t.Fatal(err)
+	}
+	check(third.Backup, true, false)
+	check(first.Backup, true, true)
+	fake.mu.Lock()
+	for p := range fake.files {
+		if strings.Contains(p, "/"+third.Backup+"/") {
+			t.Errorf("deleted WebDAV backup still contains %s", p)
+		}
+	}
+	fake.mu.Unlock()
 }
