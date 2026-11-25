@@ -36,6 +36,7 @@ type Setup struct {
 	Library   bool  `json:"library"`
 	Memory    bool  `json:"memory"`
 	Usage     bool  `json:"usage,omitempty"`
+	Sessions  bool  `json:"sessions,omitempty"`
 	SignIns   bool  `json:"signIns,omitempty"`
 }
 
@@ -61,7 +62,7 @@ func SetupText() (string, error) {
 	}
 	b, err := json.Marshal(Setup{URL: c.URL, User: c.User, Password: c.Password, Endpoint: c.Endpoint, Region: c.Region,
 		PathStyle: c.PathStyle, Branch: c.Branch, Keys: c.Keys, Agents: c.Agents, Library: c.library(), Memory: c.memoryOn(),
-		Usage: c.Usage, SignIns: c.SignIns, Providers: offOnly(c.Providers), Settings: offOnly(c.Settings), Profiles: offOnly(c.Profiles)})
+		Usage: c.Usage, Sessions: c.Sessions, SignIns: c.SignIns, Providers: offOnly(c.Providers), Settings: offOnly(c.Settings), Profiles: offOnly(c.Profiles)})
 	if err != nil {
 		return "", err
 	}

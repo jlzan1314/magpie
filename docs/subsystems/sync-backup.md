@@ -270,12 +270,19 @@ reasoning are outside the portable records.
 backup first. Each merged conversation is gzipped, encrypted with the
 existing sync passphrase and saved as a separate object. A manifest gives
 the backup its ID. For a two-way WebDAV computer, the conversation objects
-are published and verified before the manifest. A computer following the
-server can merge or import a batch with a local backup and can read existing
-WebDAV backups. Find the local objects in Magpie's
-`session-batches-v2` config subfolder and the remote objects under
-`magpie/session-batches-v2`. Every backup owns its compressed conversation
-files, and a single backup can be removed independently.
+are published before the manifest. Magpie compares the sealed file length at
+its content-addressed destination using WebDAV metadata. A match skips the
+file body. A new backup can reuse an unchanged conversation from the last
+published backup using a server-side COPY. Servers without COPY receive a
+normal upload. New uploads are read back and verified. Each backup owns its
+files and can be removed independently.
+
+The WebDAV advanced setting for sessions enables periodic backup of readable
+local conversations. The CLI equivalent is `magpie webdav set sessions=yes`.
+Use `magpie webdav sessions sync` for an immediate check. The result counts
+uploaded and skipped files, including the manifest. For mutable native Codex
+sessions the shortcut also checks the local transcript fingerprint and the
+strong ETag of the last verified remote copy, preserving fork detection.
 
 **Manage session backups** lists the local and WebDAV copies and lets you
 delete either copy explicitly. WebDAV deletion is available to computers
@@ -295,6 +302,7 @@ be retried from the backup ID.
 ```sh
 magpie webdav sessions list
 magpie webdav sessions backups
+magpie webdav sessions sync
 magpie webdav sessions delete <backup-id> local
 magpie webdav sessions delete <backup-id> webdav
 magpie webdav sessions batch --all --to codex,claude

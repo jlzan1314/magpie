@@ -30,6 +30,7 @@ const webdavUsage = `usage:
                                           library, memory, usage, sign-ins (yes|no);
                                           password= and passphrase= ask for a new one
   magpie webdav now                       sync now (the gateway also syncs by itself while it runs: see auto)
+  magpie webdav sessions sync             sync local readable conversations and report transferred or skipped files
   magpie webdav sessions list             list the readable session sources
   magpie webdav sessions backups          list local and WebDAV session backups
   magpie webdav sessions delete <id> local|webdav
@@ -63,6 +64,8 @@ const webdavUsage = `usage:
               providers=no settings=no profiles=no agents=no syncs only the library and memory
   usage       yes: this computer's usage goes up too, a file a day, sealed, and the Usage page counts
               the other computers' that share theirs, each named
+  sessions    yes: incrementally sync local readable session changes to WebDAV, skipping packed files
+              whose remote size matches
   sign-ins    yes: the subscriptions' accounts and the plugins' sign-ins go too, sealed with the
               passphrase, so a computer that syncs is signed in without signing in again. Off unless
               set. Anyone with the passphrase and the server's file can use those accounts. An account
@@ -340,7 +343,7 @@ func syncSet(k syncKind, args []string, on bool) error {
 		if !on {
 			return fmt.Errorf("%s sync is on, not %s: magpie %s set changes it; %s", c.Kind(), k.name, strings.ToLower(c.Kind()), k.turnOn())
 		}
-		next := davsync.Config{Passphrase: c.Passphrase, Keys: c.Keys, Agents: c.Agents, Library: c.Library, Memory: c.Memory, Usage: c.Usage, SignIns: c.SignIns, SignInsExcept: c.SignInsExcept,
+		next := davsync.Config{Passphrase: c.Passphrase, Keys: c.Keys, Agents: c.Agents, Library: c.Library, Memory: c.Memory, Usage: c.Usage, Sessions: c.Sessions, SignIns: c.SignIns, SignInsExcept: c.SignInsExcept,
 			Providers: c.Providers, Settings: c.Settings, Profiles: c.Profiles}
 		if o, ok := c.Kept(k.name); ok { // its server, as it was kept when sync moved from it
 			next.URL, next.User, next.Endpoint, next.Region, next.PathStyle, next.Branch = o.URL, o.User, o.Endpoint, o.Region, o.PathStyle, o.Branch
@@ -404,7 +407,7 @@ func syncSet(k syncKind, args []string, on bool) error {
 					c.SignInsExcept = append(c.SignInsExcept, id)
 				}
 			}
-		case key == "keys", key == "agents", key == "library", key == "usage", key == "sign-ins", key == "path-style" && k.cmd == "s3",
+		case key == "keys", key == "agents", key == "library", key == "usage", key == "sessions" && k.cmd == "webdav", key == "sign-ins", key == "path-style" && k.cmd == "s3",
 			key == "providers", key == "settings", key == "profiles", key == "memory":
 			if v != "yes" && v != "no" {
 				return fmt.Errorf("%s=yes|no, not %q", key, v)
@@ -419,6 +422,8 @@ func syncSet(k syncKind, args []string, on bool) error {
 				c.PathStyle = yes
 			case "usage":
 				c.Usage = yes
+			case "sessions":
+				c.Sessions = yes
 			case "sign-ins":
 				c.SignIns = yes
 			case "providers":
@@ -437,7 +442,7 @@ func syncSet(k syncKind, args []string, on bool) error {
 		case k.cmd == "github":
 			return fmt.Errorf("unknown field %q (address, branch, token, passphrase, providers, settings, profiles, keys, agents, library, memory, usage, sign-ins, sign-ins-except)", key)
 		default:
-			return fmt.Errorf("unknown field %q (address, user, password, passphrase, providers, settings, profiles, keys, agents, library, memory, usage, sign-ins, sign-ins-except)", key)
+			return fmt.Errorf("unknown field %q (address, user, password, passphrase, providers, settings, profiles, keys, agents, library, memory, usage, sessions, sign-ins, sign-ins-except)", key)
 		}
 	}
 	if bucket != nil || prefix != nil {
@@ -616,6 +621,9 @@ func syncShow(k syncKind) error {
 	if v.Usage {
 		what = append(what, "usage")
 	}
+	if v.Sessions {
+		what = append(what, "sessions")
+	}
 	if v.SignIns {
 		what = append(what, "sign-ins")
 		if len(v.SignInsExcept) > 0 {
@@ -646,6 +654,9 @@ func syncShow(k syncKind) error {
 	}
 	if v.UsageError != "" {
 		fmt.Println("  couldn't share usage:", v.UsageError)
+	}
+	if v.SessionsError != "" {
+		fmt.Println("  couldn't sync sessions:", v.SessionsError)
 	}
 	if len(v.SignIn) > 0 {
 		fmt.Println("  synced settings use these, not signed in on this computer (sync carries settings, not sign-ins, unless sign-ins=yes; to use one here: magpie accounts add <id>):", strings.Join(v.SignIn, ", "))

@@ -24,6 +24,15 @@ func webdavSessionCmd(args []string) error {
 		}
 		return json.NewEncoder(os.Stdout).Encode(out)
 	}
+	if len(args) == 1 && args[0] == "sync" {
+		out, err := davsync.SyncLocalSessions(context.Background())
+		if out.Backup != "" {
+			if encodeErr := json.NewEncoder(os.Stdout).Encode(out); encodeErr != nil {
+				return errors.Join(err, encodeErr)
+			}
+		}
+		return err
+	}
 	if len(args) == 3 && args[0] == "delete" {
 		return davsync.DeleteSessionBackup(context.Background(), args[1], args[2])
 	}
@@ -31,14 +40,18 @@ func webdavSessionCmd(args []string) error {
 		return webdavSessionBatch(args[1:])
 	}
 	if len(args) != 2 {
-		return errors.New("usage: magpie webdav sessions list | backups | delete <id> local|webdav | batch [options] | push|pull <Codex session ID>")
+		return errors.New("usage: magpie webdav sessions list | backups | sync | delete <id> local|webdav | batch [options] | push|pull <Codex session ID>")
 	}
 	res, err := davsync.TransferCodexSession(context.Background(), args[0], args[1])
 	if err != nil {
 		return err
 	}
 	if res.Changed == 0 {
-		fmt.Println("Codex session already up to date")
+		if res.Skipped > 0 {
+			fmt.Println("Codex session matches remote packed size; skipped sync")
+		} else {
+			fmt.Println("Codex session already up to date")
+		}
 	} else {
 		fmt.Println("Codex session transferred")
 	}

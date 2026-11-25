@@ -19,6 +19,7 @@ import (
 func TestWebDAVCodexSessionTransfer(t *testing.T) {
 	const id = "0196ce3b-81fc-7000-8000-7d8089eb9715"
 	const pass = "fixture-only passphrase"
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	name := filepath.Join("2026", "11", "25", "rollout-2026-11-25T18-00-00-"+id+".jsonl")
 	meta := `{"type":"session_meta","payload":{"id":"` + id + `"}}` + "\n"
 	line := `{"type":"event_msg","payload":{"type":"user_message","message":"` + strings.Repeat("test conversation ", 1000) + `"}}` + "\n"
