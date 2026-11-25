@@ -42,6 +42,10 @@ three.
 
 ## Constraints and failure behavior
 
+On macOS, the application menu's About panel uses the same running version
+as Settings › About. AppKit displays the numeric bundle build in parentheses.
+[`about_darwin.go`](../../internal/gui/about_darwin.go)
+
 ### First opening of an agent's Details
 
 In the main window, `expandLink` in
