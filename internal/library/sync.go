@@ -1166,24 +1166,66 @@ func removeServer(l *Library, name string) error {
 // ImportServer takes a server the agents have into the library: the agents
 // that have it as it is get the library's from then on, the same entry.
 func ImportServer(name string) (*Result, error) {
-	return change(func(l *Library) error {
-		for _, f := range foundServers(l) {
-			if f.Server.Name != name {
+	_, result, err := ImportServers([]string{name}, "")
+	return result, err
+}
+
+func ImportServers(names []string, source string) ([]string, *Result, error) {
+	nothing := errors.New("no MCP servers to import")
+	var imported []string
+	result, err := change(func(l *Library) error {
+		targets := Targets()
+		if source != "" {
+			index := slices.IndexFunc(targets, func(target *Target) bool { return target.Agent.ID == source })
+			if index < 0 {
+				return fmt.Errorf("no MCP target called %s", source)
+			}
+			targets[0], targets[index] = targets[index], targets[0]
+		}
+		available := make(map[string]*Server)
+		var all []string
+		for _, found := range foundServersOf(l, targets) {
+			server := found.Server
+			if found.Own || source != "" && !slices.Contains(server.Agents, source) {
 				continue
 			}
-			s := f.Server
-			s.Agents = slices.Sorted(slices.Values(s.Agents))
-			l.MCP = append(l.MCP, s)
-			for _, id := range s.Agents {
-				a := l.applied(id)
-				if !slices.Contains(a.MCP, name) {
-					a.MCP = append(a.MCP, name)
-				}
-			}
-			return nil
+			available[server.Name] = server
+			all = append(all, server.Name)
 		}
-		return fmt.Errorf("no agent has a server called %s that the library hasn't", name)
+		if len(names) == 0 {
+			names = all
+		}
+		if len(names) == 0 {
+			return nothing
+		}
+		for _, name := range names {
+			if slices.Contains(imported, name) {
+				continue
+			}
+			server := available[name]
+			if server == nil {
+				if source != "" {
+					return fmt.Errorf("%s has no unimported server called %s", source, name)
+				}
+				return fmt.Errorf("no agent has a server called %s that the library hasn't", name)
+			}
+			server.Agents = slices.Sorted(slices.Values(server.Agents))
+			l.MCP = append(l.MCP, server)
+			for _, id := range server.Agents {
+				a := l.applied(id)
+				a.MCP = append(a.MCP, name)
+			}
+			imported = append(imported, name)
+		}
+		return nil
 	})
+	if errors.Is(err, nothing) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, result, err
+	}
+	return imported, result, nil
 }
 
 // RemoveFoundServer takes a server the agents have of their own out of

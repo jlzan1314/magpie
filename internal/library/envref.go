@@ -185,6 +185,11 @@ func (f *mcpFile) refsOf() envSyntax {
 		// secret.go ResolveEnvMapContext, ResolveHeaderContext; internal/
 		// mcp/manager.go defaultTransport, K-brain 507f560)
 		return envSyntax{refDollar, refDollar}
+	case fmtMcporter:
+		// MCPorter resolves ${NAME} (and $env:NAME) in headers and env as it
+		// connects (dist/env.js resolveEnvPlaceholders, resolveEnvValue;
+		// dist/runtime/transport.js)
+		return envSyntax{refDollar, refDollar}
 	}
 	// None: Claude Desktop gives a command its env as written and only
 	// HOME, LOGNAME, PATH, SHELL, TERM and USER of its own (2.7032's app.asar

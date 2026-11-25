@@ -649,6 +649,13 @@ func targetOf(a *agent.Agent) *Target {
 		t.MCP = &mcpFile{Path: a.Path, Format: fmtTrae}
 		t.Skills = filepath.Join(h, ".trae-cn", "skills")
 		t.Copy = takesCopies(a.ID)
+	case "mcporter":
+		// MCPorter reads user-wide MCP servers from $MCPORTER_CONFIG, else
+		// $XDG_CONFIG_HOME/mcporter/mcporter.json(c), else
+		// ~/.mcporter/mcporter.json(c), with a JSONC parser (paths.js,
+		// config/path-discovery.js). It manages MCP servers alone, with no
+		// instructions or skills of its own.
+		t.MCP = &mcpFile{Path: a.Path, Format: fmtMcporter}
 	case "liveagent":
 		// LiveAgent's engine, K-brain, keeps its MCP servers in
 		// config.json.live-mcp.json beside its config.json, in the folder
@@ -1026,7 +1033,53 @@ func apps() []*agent.Agent {
 		dir := filepath.Join(d, "Trae CN")
 		out = append(out, &agent.Agent{ID: "trae-cn", Name: "TRAE CN", Icon: "trae", Dir: dir, Path: filepath.Join(dir, "User", "mcp.json")})
 	}
+	// MCPorter (github.com/openclaw/mcporter) is an MCP runtime and CLI, often
+	// run through `npx mcporter` with no global binary on PATH, so either the
+	// `mcporter` executable or its config folder/file marks it present.
+	mcDir, mcPath := mcporterPaths(home)
+	out = append(out, &agent.Agent{ID: "mcporter", Name: "MCPorter", Icon: "openclaw", Dir: mcDir, Path: mcPath, Bin: "mcporter"})
 	return out
+}
+
+// mcporterPaths resolves MCPorter's user-wide config directory and file
+// matching dist/paths.js and dist/config/path-discovery.js:
+// $MCPORTER_CONFIG when set, else mcporter.json (or an existing mcporter.jsonc)
+// under $XDG_CONFIG_HOME/mcporter (when absolute) or ~/.mcporter.
+func mcporterPaths(h string) (dir, path string) {
+	expandHome := func(raw string) string {
+		if raw == "~" {
+			return h
+		}
+		if strings.HasPrefix(raw, "~/") || strings.HasPrefix(raw, `~\`) {
+			return filepath.Join(h, strings.TrimLeft(raw[1:], `/\`))
+		}
+		return raw
+	}
+	if raw := strings.TrimSpace(appdir.Getenv("MCPORTER_CONFIG")); raw != "" {
+		p := expandHome(raw)
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		// Leave Dir empty for an explicit file override so an unrelated parent
+		// directory does not falsely count as MCPorter being installed.
+		return "", p
+	}
+	base := filepath.Join(h, ".mcporter")
+	if raw := strings.TrimSpace(appdir.Getenv("XDG_CONFIG_HOME")); raw != "" {
+		resolved := expandHome(raw)
+		if filepath.IsAbs(resolved) {
+			base = filepath.Join(resolved, "mcporter")
+		}
+	}
+	jsonPath := filepath.Join(base, "mcporter.json")
+	if _, err := os.Stat(jsonPath); err == nil {
+		return base, jsonPath
+	}
+	jsoncPath := filepath.Join(base, "mcporter.jsonc")
+	if _, err := os.Stat(jsoncPath); err == nil {
+		return base, jsoncPath
+	}
+	return base, jsonPath
 }
 
 // Targets are the agents on this machine that magpie can give any of the
