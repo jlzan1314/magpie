@@ -264,6 +264,17 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 			}
 			writeJSON(rw, out)
 			return
+		case "session-sync":
+			result, err := davsync.SyncLocalSessions(ctx)
+			out := struct {
+				davsync.SessionBatchResult
+				Failure string `json:"failure,omitempty"`
+			}{SessionBatchResult: result}
+			if err != nil {
+				out.Failure = err.Error()
+			}
+			writeJSON(rw, out)
+			return
 		case "session":
 			var in struct{ Action, ID string }
 			if err = json.NewDecoder(http.MaxBytesReader(rw, r.Body, 4096)).Decode(&in); err != nil {

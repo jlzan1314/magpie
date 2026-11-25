@@ -5,6 +5,11 @@
 const I18N = {
   zh: {
     "Manage session backups": "管理会话备份",
+    "Sessions: sync local session changes, skipping files with matching remote size": "会话：增量同步本地会话变更，线上打包大小一致时跳过",
+    "Sync local changes": "同步本地变更",
+    "Remote file matches packed size; skipped sync": "线上打包文件大小一致，已跳过同步",
+    "Remote files match packed size · skipped {skipped}": "线上打包文件大小一致 · 已跳过 {skipped} 个文件",
+    "WebDAV sync · uploaded {uploaded} · skipped {skipped}": "WebDAV 同步 · 上传 {uploaded} 个 · 跳过 {skipped} 个",
     "No session backups": "没有会话备份",
     "Use backup": "使用备份",
     "Delete local backup": "删除本机备份",
@@ -5642,6 +5647,11 @@ const I18N = {
   },
   "zh-TW": {
     "Manage session backups": "管理工作階段備份",
+    "Sessions: sync local session changes, skipping files with matching remote size": "工作階段：增量同步本機工作階段變更，線上打包大小一致時略過",
+    "Sync local changes": "同步本機變更",
+    "Remote file matches packed size; skipped sync": "線上打包檔案大小一致，已略過同步",
+    "Remote files match packed size · skipped {skipped}": "線上打包檔案大小一致 · 已略過 {skipped} 個檔案",
+    "WebDAV sync · uploaded {uploaded} · skipped {skipped}": "WebDAV 同步 · 上傳 {uploaded} 個 · 略過 {skipped} 個",
     "No session backups": "沒有工作階段備份",
     "Use backup": "使用備份",
     "Delete local backup": "刪除本機備份",
@@ -11263,6 +11273,11 @@ const I18N = {
   },
   ja: {
     "Manage session backups": "セッションのバックアップを管理",
+    "Sessions: sync local session changes, skipping files with matching remote size": "セッション：ローカル変更を差分同期し、リモートとサイズが一致するパック済みファイルをスキップ",
+    "Sync local changes": "ローカル変更を同期",
+    "Remote file matches packed size; skipped sync": "リモートのパック済みファイルとサイズが一致するため同期をスキップしました",
+    "Remote files match packed size · skipped {skipped}": "リモートのパック済みファイルとサイズが一致 · {skipped} 件スキップ",
+    "WebDAV sync · uploaded {uploaded} · skipped {skipped}": "WebDAV 同期 · {uploaded} 件アップロード · {skipped} 件スキップ",
     "No session backups": "セッションのバックアップはありません",
     "Use backup": "バックアップを使用",
     "Delete local backup": "ローカルのバックアップを削除",
@@ -16886,6 +16901,11 @@ const I18N = {
   },
   de: {
     "Manage session backups": "Sitzungssicherungen verwalten",
+    "Sessions: sync local session changes, skipping files with matching remote size": "Sitzungen: lokale Änderungen inkrementell synchronisieren und gleich große gepackte Dateien überspringen",
+    "Sync local changes": "Lokale Änderungen synchronisieren",
+    "Remote file matches packed size; skipped sync": "Gepackte Datei hat dieselbe Größe wie online; Synchronisierung übersprungen",
+    "Remote files match packed size · skipped {skipped}": "Online-Dateien haben dieselbe gepackte Größe · {skipped} übersprungen",
+    "WebDAV sync · uploaded {uploaded} · skipped {skipped}": "WebDAV-Sync · {uploaded} hochgeladen · {skipped} übersprungen",
     "No session backups": "Keine Sitzungssicherungen",
     "Use backup": "Sicherung verwenden",
     "Delete local backup": "Lokale Sicherung löschen",

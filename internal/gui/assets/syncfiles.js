@@ -48,6 +48,7 @@ window.davForm = function (v) {
   const [profL, prof] = tick(t("Profiles"), v.profiles !== false);
   // usage: off unless picked, each computer its own (#542)
   const [useL, use] = tick(t("Usage: this computer's calls, for the Usage page on the others"), !!v.usage);
+  const [sessL, sess] = tick(t("Sessions: sync local session changes, skipping files with matching remote size"), !!v.sessions);
   // sign-ins: off unless picked, sealed with the passphrase like the rest
   // (qianxunji, curtinp118 on Discord); what it lets in is said beside it
   const [siL, si] = tick(t("Sign-ins: subscription accounts and plugin sign-ins"), !!v.signIns);
@@ -83,9 +84,9 @@ window.davForm = function (v) {
   const what = el("div", "stack");
   what.append(provL, keysL, setL, agentsL, libL, memL);
   const adv = el("details", "more advanced sync-advanced");
-  adv.open = v.profiles === false || !!v.usage || !!v.signIns;
+  adv.open = v.profiles === false || !!v.usage || !!v.sessions || !!v.signIns;
   const advIn = el("div", "stack");
-  advIn.append(profL, useL, siL, exL, siSay, el("div", "hint", t("Usage goes as a file a day: times, tokens, models and costs, never what was said. Turn it on on each computer that shares its own.")));
+  advIn.append(profL, useL, sessL, siL, exL, siSay, el("div", "hint", t("Usage goes as a file a day: times, tokens, models and costs, never what was said. Turn it on on each computer that shares its own.")));
   adv.append(el("summary", "", t("Advanced")), advIn);
   const davFields = [...field(t("Address"), url, t("A folder named magpie is made in it.")),
     ...field(t("User"), user),
@@ -110,6 +111,7 @@ window.davForm = function (v) {
     for (const x of davFields) x.hidden = kind !== "webdav";
     for (const x of s3Fields) x.hidden = kind !== "s3";
     for (const x of ghFields) x.hidden = kind !== "github";
+    sessL.hidden = kind !== "webdav";
     where.textContent = !active ? ""
       : kind === active ? (other ? t("Syncing here now. The {other} settings are kept, not synced to: pick {other} to see them.", { other }) : t("Syncing here now."))
       : t("{active} is synced to now. Saving moves sync here; the {active} settings are kept for moving back.", { active: syncNames[active] });
@@ -150,11 +152,11 @@ window.davForm = function (v) {
       const m = /^github:\/\/([^/]+\/[^/]+)\/?(.*)$/i.exec(s.url);
       repo.value = m?.[1] || ""; ghPrefix.value = m?.[2] || ""; branch.value = s.branch || ""; token.value = s.password || "";
     } else { url.value = s.url; user.value = s.user || ""; pass.value = s.password || ""; }
-    keys.checked = !!s.keys; agents.checked = !!s.agents; lib.checked = !!s.library; mem.checked = !!s.memory; use.checked = !!s.usage; si.checked = !!s.signIns;
+    keys.checked = !!s.keys; agents.checked = !!s.agents; lib.checked = !!s.library; mem.checked = !!s.memory; use.checked = !!s.usage; sess.checked = !!s.sessions; si.checked = !!s.signIns;
     // left out only when the setup says so: one from before the choice syncs them
     prov.checked = s.providers !== false; sets.checked = s.settings !== false; prof.checked = s.profiles !== false;
     keysShow();
-    if (!prof.checked || use.checked || si.checked) adv.open = true;
+    if (!prof.checked || use.checked || sess.checked || si.checked) adv.open = true;
     siShow();
     // the kind picked as a click on it would, its thumb moved too
     to[1].querySelector(`.segs [data-seg="${kind}"]`)?.click();
@@ -203,7 +205,7 @@ window.davForm = function (v) {
     // so a setup from before the choice is saved as it was
     const outs = {};
     for (const [k, c] of [["providers", prov], ["settings", sets], ["profiles", prof]]) if (!c.checked || v[k] === false) outs[k] = c.checked;
-    return { ...where, passphrase: phrase.value, keys: keys.checked, agents: agents.checked, library: lib.checked, memory: mem.checked, ...outs, ...(use.checked || v.usage ? { usage: use.checked } : {}), ...(si.checked || v.signIns ? { signIns: si.checked } : {}), ...(except.length || v.signInsExcept?.length ? { signInsExcept: except } : {}) };
+    return { ...where, passphrase: phrase.value, keys: keys.checked, agents: agents.checked, library: lib.checked, memory: mem.checked, ...outs, ...(use.checked || v.usage ? { usage: use.checked } : {}), ...(kind === "webdav" && (sess.checked || v.sessions) ? { sessions: sess.checked } : {}), ...(si.checked || v.signIns ? { signIns: si.checked } : {}), ...(except.length || v.signInsExcept?.length ? { signInsExcept: except } : {}) };
   };
   peek.onclick = async () => {
     if (!(await openPasted())) return;
@@ -585,8 +587,9 @@ window.askPreviewRows = function (at, v, sub) {
 };
 
 function sessionTransferRows(at, v, row) {
+  if (v.sessionsError) showBatchFailure(at, v.sessionsError);
   const cards = [
-    ["Batch session backup and import", "Merge selected conversations, back them up, and import into the agents you choose.", window.sessionBatchForm],
+    ["Batch session backup and import", "Merge selected conversations, back them up, and import into the agents you choose.", () => window.sessionBatchForm(!!v.followServer)],
     ["Codex session transfer", "Transfer one compressed and encrypted conversation by ID.", () => window.codexSessionForm(!!v.followServer)],
   ];
   for (const [title, subtitle, form] of cards) {
@@ -622,8 +625,8 @@ window.codexSessionForm = function (followsServer) {
     try {
       if (action === "push" && !await confirmAction(t("Upload…"),
         t("The selected conversation may contain private code, prompts and tool output. It will be encrypted before upload."), t("Upload…"))) return;
-      await api("davsync/session", { action, id });
-      message.textContent = t("Done");
+      const res = await api("davsync/session", { action, id });
+      message.textContent = res.changed === 0 && res.skipped > 0 ? t("Remote file matches packed size; skipped sync") : t("Done");
     } catch (err) {
       message.textContent = t(err.message);
       message.classList.add("bad");
@@ -639,7 +642,7 @@ window.codexSessionForm = function (followsServer) {
   return form;
 };
 
-window.sessionBatchForm = function () {
+window.sessionBatchForm = function (followsServer) {
   const form = el("div", "editor sync-form session-batch-form");
   const sourceList = el("div", "session-batch-sources");
   const search = el("input");
@@ -661,11 +664,13 @@ window.sessionBatchForm = function () {
   destinations.append(el("legend", "", t("Import into agents")));
   const backup = el("button", "text", t("Back up"));
   const distribute = el("button", "text primary", t("Back up and import"));
-  backup.type = distribute.type = "button";
+  const syncChanges = el("button", "text", t("Sync local changes"));
+  backup.type = distribute.type = syncChanges.type = "button";
   const output = el("div", "session-batch-output sub wraps");
   output.setAttribute("role", "status");
   const actions = el("div", "bar");
   actions.append(backup, distribute);
+  if (!followsServer) actions.append(syncChanges);
   form.append(sources, back.label, destinations, cwd.label, actions, output,
     sessionBackupManager(id => {
       back.input.value = [back.input.value.trim(), id].filter(Boolean).join("\n");
@@ -679,6 +684,7 @@ window.sessionBatchForm = function () {
     const ready = ids().length !== 0 || all.input.checked || choices.some(c => c.input.checked);
     backup.disabled = working || !ready;
     distribute.disabled = working || !ready || targets.every(c => !c.input.checked);
+    syncChanges.disabled = working || choices.length === 0;
     sourceList.hidden = all.input.checked;
     agents.input.disabled = search.disabled = all.input.checked;
   }
@@ -751,6 +757,27 @@ window.sessionBatchForm = function () {
   }
   backup.onclick = () => run(false);
   distribute.onclick = () => run(true);
+  syncChanges.onclick = async () => {
+    working = true;
+    update();
+    output.replaceChildren();
+    output.classList.remove("bad");
+    try {
+      if (!await confirmAction(t("All readable sessions"),
+        t("The selected conversations may include private source code, prompts and tool output. Each backup is encrypted."),
+        t("Sync local changes"))) return;
+      output.textContent = t("Working…");
+      const result = await api("davsync/session-sync", {});
+      output.replaceChildren();
+      showBatchResult(output, result);
+    } catch (err) {
+      output.replaceChildren();
+      showBatchFailure(output, err.message);
+    } finally {
+      working = false;
+      update();
+    }
+  };
   return form;
 };
 
@@ -780,7 +807,15 @@ function showBatchResult(out, r) {
     clipboard.onclick = () => copy(r.backup, clipboard);
     line.append(el("span", "", t("Session backup ID")), code, clipboard);
     out.append(line);
-    if (r.remote) out.append(el("div", "", t("Backup available on WebDAV")));
+    if (r.remote) {
+      if (r.uploaded === 0 && r.skipped > 0) {
+        out.append(el("div", "", t("Remote files match packed size · skipped {skipped}", { skipped: r.skipped })));
+      } else if (r.uploaded > 0 || r.skipped > 0) {
+        out.append(el("div", "", t("WebDAV sync · uploaded {uploaded} · skipped {skipped}", { uploaded: r.uploaded, skipped: r.skipped })));
+      } else {
+        out.append(el("div", "", t("Backup available on WebDAV")));
+      }
+    }
   }
   if (r.conversations) out.append(el("div", "", t("{count} conversations · {duplicates} duplicates merged",
     { count: r.conversations, duplicates: r.duplicates })));

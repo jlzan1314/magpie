@@ -4,11 +4,18 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/yetone/magpie/internal/settings"
+	"github.com/yetone/magpie/internal/steady"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/yetone/magpie/internal/backup"
@@ -30,6 +37,7 @@ type codexSessionArchive struct {
 // SessionTransfer reports counts without exposing conversation text or paths.
 type SessionTransfer struct {
 	Changed int `json:"changed"`
+	Skipped int `json:"skipped,omitempty"`
 }
 
 // TransferCodexSession explicitly sends or receives one native session using
@@ -53,83 +61,127 @@ func TransferCodexSession(ctx context.Context, action, id string) (SessionTransf
 	if err != nil {
 		return SessionTransfer{}, err
 	}
-	if action == "pull" {
-		raw, _, err := d.readCodexSession(ctx, id)
-		if err != nil {
-			return SessionTransfer{}, err
-		}
-		if raw == nil {
-			return SessionTransfer{}, errors.New("no copy of this Codex session on WebDAV")
-		}
-		files, err := openCodexSession(raw, c.Passphrase, id)
-		if err != nil {
-			return SessionTransfer{}, err
-		}
-		n, err := sessions.ImportCodexSnapshot(ctx, id, files)
-		return SessionTransfer{Changed: n}, err
-	}
-	n, err := pushCodexSession(ctx, d, c.Passphrase, id)
-	return SessionTransfer{Changed: n}, err
-}
-
-func pushCodexSession(ctx context.Context, d *dav, passphrase, id string) (int, error) {
 	files, err := sessions.ReadCodexSnapshot(ctx, id)
 	if err != nil {
-		return 0, err
+		return SessionTransfer{}, err
 	}
-	if len(files) == 0 {
-		return 0, errors.New("no active Codex session with this ID in the current CODEX_HOME")
+	if action == "push" && len(files) == 0 {
+		return SessionTransfer{}, errors.New("no active Codex session with this ID in the current CODEX_HOME")
 	}
-	for _, dirs := range [][]string{{folder}, {folder, "sessions-v1"}, {folder, "sessions-v1", "codex"}} {
-		if err := d.ensureSessionCollection(ctx, dirs); err != nil {
-			return 0, err
-		}
+	receiptPath := filepath.Join(settings.Dir(), "session-transfer-state", stateKey(c), id+".json")
+	var receipt codexReceipt
+	if saved, err := os.ReadFile(receiptPath); err == nil {
+		_ = json.Unmarshal(saved, &receipt)
 	}
-	old, etag, err := d.readCodexSession(ctx, id)
-	if err != nil {
-		return 0, err
-	}
-	conditions := map[string]string{"If-None-Match": "*"}
-	if old != nil {
-		previous, err := openCodexSession(old, passphrase, id)
+	fingerprint := codexFingerprint(files)
+	target := d.codexSessionURL(id)
+	if receipt.Fingerprint == fingerprint && receipt.Tag != "" {
+		head, err := d.send(ctx, http.MethodHead, target, nil, map[string]string{"Accept-Encoding": "identity"})
 		if err != nil {
-			return 0, err
+			return SessionTransfer{}, err
 		}
+		head.Body.Close()
+		if head.StatusCode == http.StatusOK && head.Header.Get("ETag") == receipt.Tag {
+			length := head.ContentLength
+			if length <= 0 {
+				if n, ok := d.length(ctx, target); ok {
+					length = n
+				}
+			}
+			if length == receipt.Size {
+				return SessionTransfer{Skipped: 1}, nil
+			}
+		}
+	}
+	old, tag, err := d.readCodexSession(ctx, id)
+	if err != nil {
+		return SessionTransfer{}, err
+	}
+	var previous []sessions.CodexRollout
+	if old != nil {
+		previous, err = openCodexSession(old, c.Passphrase, id)
+		if err != nil {
+			return SessionTransfer{}, err
+		}
+	}
+	if action == "pull" {
+		if old == nil {
+			return SessionTransfer{}, errors.New("no copy of this Codex session on WebDAV")
+		}
+		count, err := sessions.ImportCodexSnapshot(ctx, id, previous)
+		if err != nil {
+			return SessionTransfer{}, err
+		}
+		rememberCodexReceipt(receiptPath, codexFingerprint(previous), tag, len(old))
+		return SessionTransfer{Changed: count}, nil
+	}
+	headers := map[string]string{"If-None-Match": "*"}
+	if old != nil {
 		if !sessions.CodexSnapshotExtends(files, previous) {
-			return 0, sessions.ErrCodexSyncConflict
+			return SessionTransfer{}, sessions.ErrCodexSyncConflict
 		}
 		if sessions.CodexSnapshotExtends(previous, files) {
-			return 0, nil
+			rememberCodexReceipt(receiptPath, fingerprint, tag, len(old))
+			return SessionTransfer{}, nil
 		}
-		if len(etag) < 2 || etag[0] != '"' || etag[len(etag)-1] != '"' {
-			return 0, errors.New("WebDAV did not give this session a strong ETag for a safe update")
+		if len(tag) < 2 || tag[0] != '"' || tag[len(tag)-1] != '"' {
+			return SessionTransfer{}, errors.New("WebDAV did not give this session a strong ETag for a safe update")
 		}
-		conditions = map[string]string{"If-Match": etag}
+		headers = map[string]string{"If-Match": tag}
+	} else {
+		for _, dirs := range [][]string{{folder}, {folder, "sessions-v1"}, {folder, "sessions-v1", "codex"}} {
+			if err := d.ensureSessionCollection(ctx, dirs); err != nil {
+				return SessionTransfer{}, err
+			}
+		}
 	}
-	raw, err := sealCodexSession(files, passphrase, id)
+	raw, err := sealCodexSession(files, c.Passphrase, id)
 	if err != nil {
-		return 0, err
+		return SessionTransfer{}, err
 	}
-	res, err := d.do(ctx, http.MethodPut, d.codexSessionURL(id), raw, conditions)
+	res, err := d.do(ctx, http.MethodPut, target, raw, headers)
 	if err != nil {
-		return 0, err
+		return SessionTransfer{}, err
 	}
 	res.Body.Close()
 	switch res.StatusCode {
-	case http.StatusPreconditionFailed, http.StatusConflict:
-		return 0, errors.New("another device updated the Codex session during transfer; try again")
-	case http.StatusOK, http.StatusCreated, http.StatusNoContent:
+	case http.StatusCreated, http.StatusOK, http.StatusNoContent:
+	case http.StatusConflict, http.StatusPreconditionFailed:
+		return SessionTransfer{}, errors.New("another device updated the Codex session during transfer; try again")
 	default:
-		return 0, fmt.Errorf("writing the Codex session to WebDAV: HTTP %d", res.StatusCode)
+		return SessionTransfer{}, fmt.Errorf("writing the Codex session to WebDAV: HTTP %d", res.StatusCode)
 	}
-	written, _, err := d.readCodexSession(ctx, id)
+	got, tag, err := d.readCodexSession(ctx, id)
 	if err != nil {
-		return 0, err
+		return SessionTransfer{}, err
 	}
-	if !bytes.Equal(written, raw) {
-		return 0, errors.New("WebDAV did not keep the full Codex session; try again")
+	if !bytes.Equal(got, raw) {
+		return SessionTransfer{}, errors.New("WebDAV did not keep the full Codex session; try again")
 	}
-	return len(files), nil
+	rememberCodexReceipt(receiptPath, fingerprint, tag, len(raw))
+	return SessionTransfer{Changed: len(files)}, nil
+}
+
+type codexReceipt struct {
+	Fingerprint string
+	Tag         string
+	Size        int64
+}
+
+func codexFingerprint(files []sessions.CodexRollout) string {
+	hash := sha256.New()
+	_ = json.NewEncoder(hash).Encode(files)
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func rememberCodexReceipt(filename, fingerprint, tag string, size int) {
+	if len(tag) < 2 || tag[0] != '"' || tag[len(tag)-1] != '"' {
+		return
+	}
+	data, err := json.Marshal(codexReceipt{fingerprint, tag, int64(size)})
+	if err == nil && os.MkdirAll(filepath.Dir(filename), 0o700) == nil {
+		_ = steady.WriteFile(filename, data, 0o600)
+	}
 }
 
 func (d *dav) ensureSessionCollection(ctx context.Context, dirs []string) error {
@@ -149,7 +201,7 @@ func (d *dav) codexSessionURL(id string) string {
 }
 
 func (d *dav) readCodexSession(ctx context.Context, id string) ([]byte, string, error) {
-	res, err := d.do(ctx, http.MethodGet, d.codexSessionURL(id), nil, nil)
+	res, err := d.do(ctx, http.MethodGet, d.codexSessionURL(id), nil, map[string]string{"Accept-Encoding": "identity"})
 	if err != nil {
 		return nil, "", err
 	}
@@ -172,9 +224,13 @@ func (d *dav) readCodexSession(ctx context.Context, id string) ([]byte, string, 
 }
 
 func sealCodexSession(files []sessions.CodexRollout, passphrase, id string) ([]byte, error) {
+	ordered := slices.Clone(files)
+	slices.SortFunc(ordered, func(a, b sessions.CodexRollout) int {
+		return strings.Compare(a.Path, b.Path)
+	})
 	var compressed bytes.Buffer
 	zw := gzip.NewWriter(&compressed)
-	err := json.NewEncoder(zw).Encode(codexSessionArchive{codexSessionVersion, "codex", id, files})
+	err := json.NewEncoder(zw).Encode(codexSessionArchive{codexSessionVersion, "codex", id, ordered})
 	if err := errors.Join(err, zw.Close()); err != nil {
 		return nil, err
 	}

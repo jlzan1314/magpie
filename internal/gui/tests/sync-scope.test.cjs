@@ -70,6 +70,11 @@ function serve(lang, posts) {
     if (pathname === "/api/groups") return json({ groups: [], models: [] });
     if (pathname === "/api/plugins") return json({ plugins: [] });
     if (pathname === "/api/davsync") return json(sync);
+    if (pathname === "/api/davsync/session-candidates") return json({ sources: [{agent:"codex",id:"sample",title:"Example session"}], targets:["codex"] });
+    if (pathname === "/api/davsync/session-sync") {
+      post();
+      return json({backup:"example", remote:true, conversations:1, uploaded:0, skipped:2});
+    }
     if (pathname === "/api/davsync/save") {
       const b = post();
       sync = { ...sync };
@@ -165,9 +170,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(await keys.isVisible(), true, "the keys tick gone with providers on");
         await click(prov.locator("input"));
         await click(sets.locator("input"));
+        await click(adv.locator("summary"));
+        const sessionSync = tickOf("Sessions: sync local session changes, skipping files with matching remote size").locator("input");
+        assert.equal(await sessionSync.isChecked(), false);
+        await click(sessionSync);
         await noneWider(page, "#syncList .row.pref, #syncList .sync-form, #syncList .sync-form .bar > button");
         await click(form.locator("button", { hasText: exact(w("Save")) }));
         const saved = await waitPosts("/api/davsync/save", 1);
+        assert.equal(saved.sessions, true);
         assert.equal(saved.providers, false);
         assert.equal(saved.settings, false);
         assert.equal("profiles" in saved, false, "profiles said with it left as it was");
@@ -215,6 +225,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await ask.waitFor({ state: "detached" });
         await undoRow.waitFor({ state: "detached" });
         assert.equal(await list.locator(".sync-preview-row").count(), 1, "Preview a sync gone after the undo");
+        const batch = list.locator(".sync-session-row", { hasText: w("Batch session backup and import") });
+        await click(batch.getByRole("button"));
+        const panel = list.locator(".session-batch-form");
+        await click(panel.getByRole("button",{name:w("Sync local changes"),exact:true}));
+        const confirm = page.getByRole("alertdialog").getByRole("button",{name:w("Sync local changes"),exact:true});
+        await confirm.click();
+        await panel.getByText(w("Remote files match packed size · skipped {skipped}",{skipped:2}),{exact:true}).waitFor();
+        assert.equal(all("/api/davsync/session-sync").length,1);
         assert.deepEqual(errors, []);
       });
     }

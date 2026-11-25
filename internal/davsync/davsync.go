@@ -105,6 +105,9 @@ type Config struct {
 	// Usage is whether this computer shares its usage with the others
 	// syncing to the server, and sees theirs (#542)
 	Usage bool `json:"usage,omitempty"`
+	// Sessions is whether this computer incrementally syncs local readable
+	// session changes to WebDAV, skipping packed files whose remote size matches.
+	Sessions bool `json:"sessions,omitempty"`
 	// SignIns is whether the subscription accounts and the plugins'
 	// sign-ins go too, with their credentials, inside the file sealed with
 	// Passphrase: off unless the user turns it on
@@ -252,10 +255,11 @@ type state struct {
 	Sum    string    `json:"sum,omitempty"` // the server's file, hashed
 	// Server is that file's version, as the server tells it: the next sync
 	// asks for the file only if it isn't still this one
-	Server version           `json:"server,omitzero"`
-	Local  map[string]string `json:"local,omitempty"`
-	Remote map[string]string `json:"remote,omitempty"`
-	Usage  *usageState       `json:"usage,omitempty"`
+	Server   version           `json:"server,omitzero"`
+	Local    map[string]string `json:"local,omitempty"`
+	Remote   map[string]string `json:"remote,omitempty"`
+	Usage    *usageState       `json:"usage,omitempty"`
+	Sessions *sessionSyncState `json:"sessions,omitempty"`
 	// Undo is the file the last Restore kept this computer's setup in, from
 	// just before it: Undo brings it back
 	Undo string `json:"undo,omitempty"`
@@ -528,7 +532,7 @@ func Off() error {
 			os.Remove(path("sync-state.json"))
 			os.Remove(path(cacheName))
 		} else {
-			st.Error, st.Notice, st.Undo, st.Usage, st.Applied = "", nil, "", nil, nil
+			st.Error, st.Notice, st.Undo, st.Usage, st.Sessions, st.Applied = "", nil, "", nil, nil, nil
 			saveState(st)
 		}
 		usage.DropAllShared()   // the others' usage came by sync: it goes with it (#542)
@@ -560,15 +564,18 @@ type View struct {
 	Settings      bool   `json:"settings"`
 	Profiles      bool   `json:"profiles"`
 	Usage         bool   `json:"usage,omitempty"`
+	Sessions      bool   `json:"sessions,omitempty"`
 	SignIns       bool   `json:"signIns,omitempty"`
 	// SignInsExcept are the subscriptions whose sign-ins stay out
 	// (Config.SignInsExcept)
 	SignInsExcept []string `json:"signInsExcept,omitempty"`
 	// UsageError is why usage couldn't be shared the last time it was tried
-	UsageError string    `json:"usageError,omitempty"`
-	Last       time.Time `json:"last,omitzero"`
-	Error      string    `json:"error,omitempty"`
-	Notice     *Notice   `json:"notice,omitempty"`
+	UsageError     string    `json:"usageError,omitempty"`
+	SessionsError  string    `json:"sessionsError,omitempty"`
+	SessionsBackup string    `json:"sessionsBackup,omitempty"`
+	Last           time.Time `json:"last,omitzero"`
+	Error          string    `json:"error,omitempty"`
+	Notice         *Notice   `json:"notice,omitempty"`
 	// Other is the other kind's server, kept for moving back to: not
 	// synced to
 	Other   *OtherView           `json:"other,omitempty"`
@@ -635,6 +642,10 @@ func Status() View {
 		if c.Usage && st.Usage != nil {
 			v.UsageError = st.Usage.Error
 		}
+		if c.Sessions && st.Sessions != nil {
+			v.SessionsError = st.Sessions.Error
+			v.SessionsBackup = st.Sessions.Backup
+		}
 		if c.library() {
 			// one settled since (Update fetched the skill) isn't said
 			v.LibraryLeft, v.LibraryProblems = st.LibraryLeft, said(library.Unsettled(st.LibraryProblems))
@@ -645,7 +656,7 @@ func Status() View {
 			}
 		}
 	}
-	v.Usage, v.SignIns, v.SignInsExcept = c.Usage, c.SignIns, c.SignInsExcept
+	v.Usage, v.Sessions, v.SignIns, v.SignInsExcept = c.Usage, c.Sessions, c.SignIns, c.SignInsExcept
 	if c.Agents {
 		v.Own = ownFields(st)
 	}
@@ -832,6 +843,7 @@ func syncNow(ctx context.Context, force bool, expect string) error {
 	} else {
 		st.Last = time.Now()
 		shareUsage(ctx, c, &st, force)
+		shareSessions(ctx, c, &st)
 	}
 	saveState(st)
 	return err
