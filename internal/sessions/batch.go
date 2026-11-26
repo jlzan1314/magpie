@@ -76,17 +76,22 @@ type BatchFailure struct {
 
 // CollectBatch preserves the strict behavior for callers that require all sources.
 func CollectBatch(ctx context.Context, refs []BatchSource, all bool) ([]BatchConversation, error) {
-	entries, _, err := collectBatch(ctx, refs, all, false)
+	entries, _, err := collectBatch(ctx, refs, all, false, false)
 	return entries, err
 }
 
 // CollectAvailableBatch returns readable transcripts and identifies individual
 // failures so unrelated conversations can still reach a verified snapshot.
 func CollectAvailableBatch(ctx context.Context, refs []BatchSource, all bool) ([]BatchConversation, []BatchFailure, error) {
-	return collectBatch(ctx, refs, all, true)
+	return collectBatch(ctx, refs, all, true, false)
 }
 
-func collectBatch(ctx context.Context, refs []BatchSource, all, partial bool) ([]BatchConversation, []BatchFailure, error) {
+// CollectOutgoingBatch leaves out unedited native copies created by an import.
+func CollectOutgoingBatch(ctx context.Context, refs []BatchSource, all bool) ([]BatchConversation, []BatchFailure, error) {
+	return collectBatch(ctx, refs, all, true, true)
+}
+
+func collectBatch(ctx context.Context, refs []BatchSource, all, partial, outgoing bool) ([]BatchConversation, []BatchFailure, error) {
 	if all && len(refs) != 0 {
 		return nil, nil, errors.New("choose all sessions or individual sessions")
 	}
@@ -125,6 +130,9 @@ func collectBatch(ctx context.Context, refs []BatchSource, all, partial bool) ([
 				}
 				failed = append(failed, BatchFailure{ref, s.Title, failure.Error()})
 			}
+			continue
+		}
+		if outgoing && unchangedImport(s, c) {
 			continue
 		}
 		out = append(out, c)
@@ -312,13 +320,65 @@ func knownBatchTargets(ctx context.Context, entries []BatchConversation, targets
 		}
 		wanted[project][c.Fingerprint()] = true
 	}
+	return indexBatchTargets(ctx, targets, wanted)
+}
+
+// BatchReceiver indexes local transcripts once, then imports a remote snapshot
+// a conversation at a time without retaining the decoded history of the batch.
+type BatchReceiver struct {
+	targets []string
+	cwd     string
+	known   map[batchDestination]Session
+}
+
+func NewBatchReceiver(ctx context.Context, targets []string, cwd string) (*BatchReceiver, error) {
+	if len(targets) == 0 {
+		return nil, errors.New("choose one or more target agents")
+	}
+	if err := CheckBatchTargets(targets, cwd); err != nil {
+		return nil, err
+	}
+	targets = slices.Compact(slices.Sorted(slices.Values(targets)))
+	known := indexBatchTargets(ctx, targets, nil)
+	return &BatchReceiver{targets: targets, cwd: cwd, known: known}, ctx.Err()
+}
+
+func (r *BatchReceiver) Receive(ctx context.Context, c BatchConversation) (int, error) {
+	project := r.cwd
+	if project == "" {
+		project = c.Cwd
+		if !batchDirectory(project) {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return 0, err
+			}
+			project = home
+		}
+	}
+	count := 0
+	var failures []error
+	for _, target := range r.targets {
+		if err := ctx.Err(); err != nil {
+			return count, err
+		}
+		result := importBatchItem(c, target, project, r.known)
+		if result.Error != "" {
+			failures = append(failures, fmt.Errorf("importing into %s: %s", target, result.Error))
+		} else if !result.Existing {
+			count++
+		}
+	}
+	return count, errors.Join(failures...)
+}
+
+func indexBatchTargets(ctx context.Context, targets []string, wanted map[string]map[string]bool) map[batchDestination]Session {
 	known := map[batchDestination]Session{}
 	for ref, s := range batchSources() {
 		if ctx.Err() != nil {
 			break
 		}
 		project := filepath.Clean(s.Cwd)
-		if ref.WSL != "" || wanted[project] == nil || !slices.Contains(targets, ref.Agent) {
+		if ref.WSL != "" || (wanted != nil && wanted[project] == nil) || !slices.Contains(targets, ref.Agent) {
 			continue
 		}
 		c, err := readBatchConversation(ctx, ref, s)
@@ -327,7 +387,7 @@ func knownBatchTargets(ctx context.Context, entries []BatchConversation, targets
 		}
 		sum := c.Fingerprint()
 		key := batchDestination{s.Agent, project, sum}
-		if old, found := known[key]; wanted[project][sum] && (!found || s.ID < old.ID) {
+		if old, found := known[key]; (wanted == nil || wanted[project][sum]) && (!found || s.ID < old.ID) {
 			known[key] = s
 		}
 	}
@@ -403,7 +463,14 @@ func importBatchConversation(c BatchConversation, target, cwd string) (CarryResu
 		return CarryResult{}, false, err
 	}
 	r.Command = resumeCommand("", target, r.ID, cwd, r.Path)
-	raw, err := json.Marshal(r)
+	receipt := batchImportReceipt{CarryResult: r}
+	// Hash the native representation, since cross-agent conversion can change
+	// tool items. Later edits will then be exported as ordinary local changes.
+	native := Session{Agent: target, ID: r.ID, Path: r.Path, Cwd: cwd}
+	if created, e := readBatchConversation(context.Background(), BatchSource{Agent: target, ID: r.ID}, native); e == nil {
+		receipt.Fingerprint = created.Fingerprint()
+	}
+	raw, err := json.Marshal(receipt)
 	if err == nil {
 		err = steady.WriteFile(save, raw, 0o600)
 	}
@@ -424,4 +491,21 @@ func batchCarryItems(parts []Part) []carryItem {
 		}
 	}
 	return out
+}
+
+type batchImportReceipt struct {
+	CarryResult
+	Fingerprint string `json:"fingerprint,omitempty"`
+}
+
+func unchangedImport(s Session, c BatchConversation) bool {
+	if _, err := uuid.Parse(s.ID); err != nil || s.WSL != "" {
+		return false
+	}
+	raw, err := os.ReadFile(filepath.Join(settings.Dir(), "session-imports", s.ID+".json"))
+	if err != nil {
+		return false
+	}
+	var saved batchImportReceipt
+	return json.Unmarshal(raw, &saved) == nil && saved.Fingerprint != "" && saved.Agent == s.Agent && saved.Path == s.Path && saved.Fingerprint == c.Fingerprint()
 }

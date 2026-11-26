@@ -48,7 +48,7 @@ window.davForm = function (v) {
   const [profL, prof] = tick(t("Profiles"), v.profiles !== false);
   // usage: off unless picked, each computer its own (#542)
   const [useL, use] = tick(t("Usage: this computer's calls, for the Usage page on the others"), !!v.usage);
-  const [sessL, sess] = tick(t("Sessions: sync local session changes, skipping files with matching remote size"), !!v.sessions);
+  const [sessL, sess] = tick(t("Back up readable sessions on WebDAV sync"), !!v.sessions);
   // sign-ins: off unless picked, sealed with the passphrase like the rest
   // (qianxunji, curtinp118 on Discord); what it lets in is said beside it
   const [siL, si] = tick(t("Sign-ins: subscription accounts and plugin sign-ins"), !!v.signIns);
@@ -82,11 +82,11 @@ window.davForm = function (v) {
   siShow();
   si.onchange = siShow;
   const what = el("div", "stack");
-  what.append(provL, keysL, setL, agentsL, libL, memL);
+  what.append(provL, keysL, setL, agentsL, libL, memL, sessL);
   const adv = el("details", "more advanced sync-advanced");
-  adv.open = v.profiles === false || !!v.usage || !!v.sessions || !!v.signIns;
+  adv.open = v.profiles === false || !!v.usage || !!v.signIns;
   const advIn = el("div", "stack");
-  advIn.append(profL, useL, sessL, siL, exL, siSay, el("div", "hint", t("Usage goes as a file a day: times, tokens, models and costs, never what was said. Turn it on on each computer that shares its own.")));
+  advIn.append(profL, useL, siL, exL, siSay, el("div", "hint", t("Usage goes as a file a day: times, tokens, models and costs, never what was said. Turn it on on each computer that shares its own.")));
   adv.append(el("summary", "", t("Advanced")), advIn);
   const davFields = [...field(t("Address"), url, t("A folder named magpie is made in it.")),
     ...field(t("User"), user),
@@ -156,7 +156,7 @@ window.davForm = function (v) {
     // left out only when the setup says so: one from before the choice syncs them
     prov.checked = s.providers !== false; sets.checked = s.settings !== false; prof.checked = s.profiles !== false;
     keysShow();
-    if (!prof.checked || use.checked || sess.checked || si.checked) adv.open = true;
+    if (!prof.checked || use.checked || si.checked) adv.open = true;
     siShow();
     // the kind picked as a click on it would, its thumb moved too
     to[1].querySelector(`.segs [data-seg="${kind}"]`)?.click();
@@ -599,7 +599,7 @@ function sessionTransferRows(at, v, row) {
     let tracker;
     button.onclick = () => {
       if (panel.firstChild) panel.replaceChildren();
-      else panel.append(form(!!v.followServer, tracker));
+      else panel.append(form(!!v.followServer, tracker, v));
       button.textContent = t(panel.firstChild ? "Close" : "Open");
     };
     const heading = row(t(title), t(subtitle), button, "sync-session-row");
@@ -624,10 +624,11 @@ function sessionActivityLine(at, initial, restore) {
   failures.append(failedSummary, failedList);
   failures.hidden = true;
   last.hidden = retry.hidden = true;
-  at.append(note, last, retry, failures);
+  const imported = el("div", "sub wraps");
+  at.append(note, imported, last, retry, failures);
   let timer, notifyForm, revision = 0, previousFailures = "", active = false;
   const paint = a => {
-    active = ["preparing", "uploading", "waiting"].includes(a.phase);
+    active = ["preparing", "uploading", "waiting", "importing"].includes(a.phase);
     notifyForm?.();
     const bad = a.error || "";
     const remaining = Math.max(0, Math.ceil((Date.parse(a.retryAt) - Date.now()) / 1000));
@@ -635,6 +636,7 @@ function sessionActivityLine(at, initial, restore) {
     if (a.phase === "preparing") words = t("Preparing session backup…");
     else if (a.phase === "waiting") words = t("Waiting to retry in {n} s", { n: remaining });
     else if (a.phase === "uploading") words = t("Verified {done} of {count} files · {size} of {total}", { done: a.objects, count: a.count, size: fmtBytes(a.bytes), total: fmtBytes(a.total) });
+    else if (a.phase === "importing") words = t("Importing remote sessions…");
     else if (bad) words = tNotice(bad);
     else if (a.phase === "pending") words = t("Session backup upload was interrupted. The next sync will resume it.");
     else if (a.phase === "partial") words = t("{n} conversations backed up", { n: a.conversations });
@@ -646,6 +648,9 @@ function sessionActivityLine(at, initial, restore) {
     note.hidden = !words;
     note.classList.toggle("bad", !!bad && !active && a.phase !== "pending");
     note.classList.toggle("session-batch-error", !!bad && !active);
+    imported.textContent = a.importError ? tNotice(a.importError) : a.importedAt ? t("Last automatic import · {n} sessions · {when}", {n:a.imported, when:new Date(a.importedAt).toLocaleString()}) : "";
+    imported.hidden = !imported.textContent;
+    imported.classList.toggle("bad", !!a.importError);
     last.hidden = !a.latest;
     if (a.latest) {
       last.textContent = t("Last verified backup · {when}", { when: new Date(a.last).toLocaleString() });
@@ -761,7 +766,7 @@ async function rememberSessionPreferences(prefs) {
 
 const sessionRefKey = ({ agent, id, wsl }) => JSON.stringify([agent, id, wsl || ""]);
 
-window.sessionBatchForm = function (followsServer, tracker) {
+window.sessionBatchForm = function (followsServer, tracker, sync) {
   const draftAtOpen = sessionPrefsDraft;
   const form = el("div", "editor sync-form session-batch-form");
   const sourceList = el("div", "session-batch-sources");
@@ -827,11 +832,14 @@ window.sessionBatchForm = function (followsServer, tracker) {
   };
   form.useSessionBackup = chooseBackup;
   back.oninput = () => { entry = entryTitle = ""; };
+  const autoImport = batchTick(t("Import remote sessions into selected agents on WebDAV sync"));
+  const schedule = sync.sessions && !followsServer && sync.auto ? t("Session backup every {n} min", {n: sync.auto}) : t("Automatic WebDAV session backup is off");
   const manager = sessionBackupManager(chooseBackup);
   manager.open = followsServer;
   form.append(...field(t("Sessions"), sources),
     ...backupField,
     ...field(t("Import into agents"), destinations),
+    ...field(t("Automatic sync"), autoImport.label, schedule),
     ...field(t("Target project folder"), cwd),
     manager, actions, output);
 
@@ -848,6 +856,7 @@ window.sessionBatchForm = function (followsServer, tracker) {
       sourceAgent,
       search: search.value,
       backupIDs: back.value, entry, entryTitle,
+      autoImport: autoImport.input.checked,
       targets: chosenTargets(),
       cwd: cwd.value,
     });
@@ -856,6 +865,8 @@ window.sessionBatchForm = function (followsServer, tracker) {
     if (entry && (all.input.checked || choices.some(c => c.input.checked))) entry = entryTitle = "";
     selection.textContent = entryTitle || entry;
     selection.hidden = !entry;
+    autoImport.input.disabled = !loaded || !chosenTargets().length;
+    if (loaded && !chosenTargets().length) autoImport.input.checked = false;
     const ready = loaded && (ids().length !== 0 || selectingAll() || choices.some(c => c.input.checked));
     backup.disabled = working || !ready;
     distribute.textContent = ids().length && !selectingAll() && !chosen().length ? t("Import") : t("Back up and import");
@@ -887,6 +898,7 @@ window.sessionBatchForm = function (followsServer, tracker) {
     entry = prefs.entry || "";
     entryTitle = prefs.entryTitle || "";
     cwd.value = prefs.cwd || "";
+    autoImport.input.checked = !!prefs.autoImport;
     const selected = new Set((prefs.sources || []).map(sessionRefKey));
     choices = r.sources.map(({ agent, id, wsl, title, cwd }) => {
       const meta = [agentName(agent), wsl, cwd].filter(Boolean).join(" · ");

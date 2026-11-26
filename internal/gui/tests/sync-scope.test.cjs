@@ -188,7 +188,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await click(prov.locator("input"));
         await click(sets.locator("input"));
         await click(adv.locator("summary"));
-        const sessionSync = tickOf("Sessions: sync local session changes, skipping files with matching remote size").locator("input");
+        const sessionSync = tickOf("Back up readable sessions on WebDAV sync").locator("input");
         assert.equal(await sessionSync.isChecked(), false);
         await click(sessionSync);
         await noneWider(page, "#syncList .row.pref, #syncList .sync-form, #syncList .sync-form .bar > button");
@@ -295,6 +295,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await search.fill("Long title");
         await panel.getByRole("textbox", { name: w("Existing backup IDs") }).fill("example");
         await panel.getByRole("group", { name: w("Import into agents") }).getByRole("checkbox", { name: "Codex" }).check();
+        const autoImport = panel.getByRole("checkbox",{name:w("Import remote sessions into selected agents on WebDAV sync")});
+        assert.equal(await autoImport.isChecked(), false);
+        await autoImport.check();
         const savedDraft = page.waitForResponse(response => response.status() === 204 &&
           response.url().endsWith("/api/davsync/session-preferences") &&
           response.request().postDataJSON()?.cwd === "/fixture/project");
@@ -308,6 +311,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           [...document.querySelectorAll(".session-batch-form input")].some(input => input.value === "/fixture/project"));
         assert.equal(await allSessions.isChecked(), false);
         assert.equal(await search.inputValue(), "Long title");
+        assert.ok(await autoImport.isChecked(), "automatic import survives reopening Settings");
         assert.equal(await panel.getByRole("button", { name: w("Source agent") }).textContent(), "Codex");
         assert.equal(await sessions.filter({ visible: true }).count(), 1);
         assert.ok(await sessions.filter({ visible: true }).getByRole("checkbox").isChecked());

@@ -132,15 +132,16 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 	})
 	mux.HandleFunc("POST /api/autobackup/{action}", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct {
-			On    *bool
-			Hours *int
-			Keep  *int
-			Dir   *string // "" is the default folder
-			Name  string
-			// SignIns puts the sign-ins in the backups, sealed with
-			// Passphrase ("" keeps the one set)
+			On         *bool
+			Hours      *int
+			Keep       *int
+			Dir        *string // "" is the default folder
+			Name       string
+			Sessions   *bool
+			Targets    []string
+			Cwd        string
 			SignIns    *bool
-			Passphrase string
+			Passphrase string // empty uses the saved local backup passphrase
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil && !errors.Is(err, io.EOF) {
 			fail(rw, err)
@@ -173,6 +174,9 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 				if in.Passphrase != "" {
 					c.Passphrase = in.Passphrase
 				}
+				if in.Sessions != nil {
+					c.Sessions = *in.Sessions
+				}
 				if in.SignIns != nil {
 					c.SignIns = *in.SignIns
 				}
@@ -193,6 +197,14 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 			if err = os.MkdirAll(dir, 0o700); err == nil {
 				err = w.OpenFolder(dir)
 			}
+		case "restore-sessions":
+			out, e := davsync.RestoreAutoSessions(r.Context(), in.Name, in.Passphrase, in.Cwd, in.Targets)
+			if e != nil {
+				fail(rw, e)
+				return
+			}
+			writeJSON(rw, map[string]any{"imports": out})
+			return
 		case "restore": // what is here is backed up first, to undo it
 			res, before, err := backup.AutoRestore(in.Name, Version)
 			if err != nil {

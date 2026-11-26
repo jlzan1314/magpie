@@ -32,7 +32,7 @@ const tr = (lang, k, vars = {}) => {
 const hourAgo = new Date(Date.now() - 3600e3).toISOString();
 const dayAgo = new Date(Date.now() - 86400e3).toISOString();
 const backups = [
-  { name: "magpie-20261102-010000-auto.json", made: hourAgo, reason: "auto", providers: 3, size: 900 },
+  { name: "magpie-20261102-010000-auto.json", made: hourAgo, reason: "auto", providers: 3, size: 900, sessions:true },
   { name: "magpie-20261101-010000-restore.json", made: dayAgo, reason: "restore", providers: 1, size: 700 },
 ];
 
@@ -63,9 +63,11 @@ function serve(lang, posts) {
       if (action === "set") {
         if (body.on !== undefined) view = { ...view, on: body.on };
         if (body.hours) view = { ...view, hours: body.hours };
+        if (body.sessions !== undefined) view = { ...view, sessions: body.sessions, passphrase:true };
         if (body.keep) view = { ...view, keep: body.keep };
         if (body.dir === "") view = { ...view, custom: false, inside: true, dir: "~/Library/Application Support/magpie/auto-backups" };
       }
+      if (action === "restore-sessions") return json({imports:[{agent:"codex",session:"fixture"}]});
       if (action === "restore") {
         const before = { name: "magpie-20261102-020000-restore.json", made: new Date().toISOString(), reason: "restore", providers: 3, size: 900 };
         view = { ...view, backups: [before, ...view.backups] };
@@ -157,6 +159,21 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(await list.locator(".auto-backup-version").count(), 2);
         assert.ok((await sub(list.locator(".auto-backup-version").nth(1))).startsWith(w("What was here before a restore")));
         assert.ok((await sub(list.locator(".auto-backup-version").first())).includes(w("{n} providers", { n: 3 })));
+
+        const sessionRow=rowNamed(w("Sessions in local backups"));
+        await sessionRow.getByText(w("On"),{exact:true}).click();
+        const phraseForm=list.locator(".auto-backup-phrase");
+        await phraseForm.locator('input[type="password"]').nth(0).fill("fixture passphrase");
+        await phraseForm.locator('input[type="password"]').nth(1).fill("fixture passphrase");
+        await phraseForm.getByRole("button",{name:w("Turn on"),exact:true}).click();
+        await phraseForm.waitFor({state:"detached"});
+        assert.ok(posts.some(x=>x.action==="set" && x.body.sessions && !x.body.signIns));
+        await list.getByRole("button",{name:w("Restore sessions…"),exact:true}).first().click();
+        const restoreSessions=page.locator(".restore-ask").filter({has:page.getByRole("checkbox",{name:"Codex"})});
+        await restoreSessions.getByRole("checkbox",{name:"Codex"}).check();
+        await restoreSessions.getByRole("button",{name:w("Import"),exact:true}).click();
+        await restoreSessions.waitFor({state:"detached"});
+        assert.deepEqual(posts.find(x=>x.action==="restore-sessions").body.targets, ["codex"]);
 
         // nothing wider than the window, the long folder wrapping
         const wide = await page.evaluate(() => {

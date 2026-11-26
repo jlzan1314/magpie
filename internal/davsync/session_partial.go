@@ -22,7 +22,7 @@ func (e *sessionObjectRejected) Error() string {
 // local backup intact. The subset has its own content address and directory.
 func (s batchStore) publishPartial(ctx context.Context, full batchManifest, rejected map[batchObject]error) (string, batchPublishStats, error) {
 	var stats batchPublishStats
-	sub := batchManifest{Version: 2, Device: full.Device}
+	sub := batchManifest{Version: 2, Device: full.Device, Origin: full.Origin}
 	var objects []batchObject
 	seen := map[batchObject]bool{}
 	for i, id := range full.Entries {

@@ -290,7 +290,7 @@ a lost PUT response. A server-side COPY into a new snapshot is verified
 at its destination. Servers without COPY receive a normal upload. Each backup owns its
 files and can be removed independently.
 
-The WebDAV advanced setting for sessions enables periodic backup of readable
+The **Back up readable sessions on WebDAV sync** setting enables periodic backup of readable
 local conversations. The CLI equivalent is `magpie webdav set sessions=yes`.
 Use `magpie webdav sessions sync` for an immediate check. The result counts
 uploaded and skipped files, including the manifest. An interrupted session
@@ -325,6 +325,25 @@ target Agent and import. Picking a backup clears the live source selection.
 The picker also allows deleting a local or remote backup. WebDAV deletion
 requires two-way sync. V1 shared objects remain after deleting a V1 manifest.
 
+The batch panel shows the configured WebDAV backup interval. Select one or
+more destination agents and enable **Import remote sessions into selected
+agents on WebDAV sync** to receive conversations during an ordinary sync
+or a scheduled sync, including on a computer set to follow the server.
+These choices belong to this device and the configured WebDAV account.
+The first sync takes the newest published snapshot from each other device.
+Snapshots tied on timestamp or without a server timestamp are considered together.
+Subsequent syncs check new snapshots. Receipts are scoped to the server,
+targets and project directory. An interrupted import is retried and reuses
+any native sessions already written. A missing manifest is checked again
+after the sender finishes. Older backups without an identifiable source
+remain available through the restore picker.
+
+Set a project directory to place received sessions together. With no
+override, automatic import uses the original directory if it exists here,
+and the receiving user's home otherwise. Automatic uploads exclude unchanged
+copies created by import. Continuing one of those conversations makes its
+edited history eligible for the next upload.
+
 Native import runs after backup, into the chosen Codex and Claude Code
 stores in parallel. Each target returns its new session ID and resume
 command. An identical session already in the target project is reused when
@@ -335,6 +354,8 @@ be retried from the backup ID.
 ```sh
 magpie webdav sessions list
 magpie webdav sessions backups
+magpie webdav sessions auto-import --to codex --cwd /path/to/project
+magpie webdav sessions auto-import off
 magpie webdav sessions sync
 magpie webdav sessions delete <backup-id> local
 magpie webdav sessions delete <backup-id> webdav
@@ -405,6 +426,16 @@ clock.
 - **Schedule:** a backup is due `Hours` after the newest, so a restart
   doesn't make one early; one whose bundle equals the newest's is not
   written.
+- **Sessions in local backups** opts this computer into capturing readable
+  conversations on the same schedule and through **Back up now**, even
+  offline. Set a local backup passphrase. Each version has its own
+  `session_<version>.zip` companion beside the settings JSON, containing
+  the same compressed, individually sealed objects as a WebDAV snapshot.
+  Copy both files to move a backup. Session-only changes produce a new
+  version. Keep and delete apply to the companion too. On a version with
+  sessions, **Restore sessions…** lets the user select Codex, Claude Code,
+  or both, an optional target project and the original passphrase. Existing
+  settings-only versions continue to restore normally.
 - **Pruning** (`pruneAuto`, WuMark1218 on X): at every look of the
   schedule (every 10 minutes, made or not) and after each write, per reason
   (`-auto`, `-restore`), files at a backup's name are ordered by the stamp
@@ -423,7 +454,7 @@ clock.
   file from the configured backup folder. The Versions list refreshes after
   confirmation. The action is available while scheduled backups are off.
 - **API:** `GET /api/autobackup`; `POST /api/autobackup/{set,choose,now,
-  reveal,restore,delete}`. `set` changes only the fields sent; `dir ""` is the
+  reveal,restore,restore-sessions,delete}`. `set` changes only the fields sent; `dir ""` is the
   default folder. Settings draws it under Sync's Export and Import from the
   lazy [`autobackup.js`](../../internal/gui/assets/autobackup.js).
   Its Versions row says how many and the newest (a state, kept in sight

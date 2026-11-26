@@ -85,15 +85,23 @@ function autoBackupRows(v) {
       segs([3, 7, 14, 30].map((n) => [n, String(n)]), v.keep, (n) => autoBackupDo("set", { keep: n })));
     // the sign-ins (qianxunji, curtinp118 on Discord): off unless picked,
     // and sealed with a passphrase asked for the first time
-    const asking = autoBackupPhrase && !v.signIns;
+    const asking = autoBackupPhrase === "signIns" && !v.signIns;
     row(t("Sign-ins in backups"), v.signIns ? t("Subscription accounts and plugin sign-ins, sealed with the passphrase set here")
       : t("Off: after a restore on another computer, sign in again"),
     segs([["off", t("Off")], ["on", t("On")]], v.signIns || asking ? "on" : "off", (x) => {
-      if (x === "on" && !v.passphrase) { autoBackupPhrase = true; renderSync(); return; }
+      if (x === "on" && !v.passphrase) { autoBackupPhrase = "signIns"; renderSync(); return; }
       autoBackupPhrase = false;
       autoBackupDo("set", { signIns: x === "on" });
     }));
-    if (asking) rows.push(autoBackupPhraseForm());
+    if (asking) rows.push(autoBackupPhraseForm("signIns"));
+    const sessionPhrase = autoBackupPhrase === "sessions" && !v.sessions;
+    row(t("Sessions in local backups"), t("Save readable conversations in a separate encrypted file on this schedule and with Back up now."),
+      segs([["off",t("Off")],["on",t("On")]], v.sessions || sessionPhrase ? "on" : "off", value => {
+        if (value === "on" && !v.passphrase) { autoBackupPhrase = "sessions"; renderSync(); return; }
+        autoBackupPhrase = false;
+        autoBackupDo("set",{sessions:value === "on"});
+      }));
+    if (sessionPhrase) rows.push(autoBackupPhraseForm("sessions"));
   }
   if (on || v.backups?.length) {
     const tools = [btn(t("Change…"), (b) => autoBackupDo("choose", {}, b)), btn(t("Show"), () => api("autobackup/reveal", {}).catch(statusErr))];
@@ -144,7 +152,12 @@ function autoBackupRows(v) {
       await autoBackupDo("delete", { name: b.name }, button);
     });
     remove.classList.add("danger");
-    row(when, what.join(" · "), btn(t("Restore…"), () => autoBackupAsk(b, when)), remove).classList.add("auto-backup-version");
+    const tools = [btn(t("Restore…"), () => autoBackupAsk(b, when))];
+    if (b.sessions) {
+      what.push(t("Sessions"));
+      tools.push(btn(t("Restore sessions…"), () => restoreAutoSessions(b)));
+    }
+    row(when, what.join(" · "), ...tools, remove).classList.add("auto-backup-version");
   }
   return rows;
 }
@@ -284,11 +297,11 @@ function autoBackupAsk(b, when) {
 
 // autoBackupPhraseForm asks for the passphrase the backups' sign-ins are
 // sealed with, as they are turned on
-function autoBackupPhraseForm() {
+function autoBackupPhraseForm(part) {
   const ed = el("div", "editor sync-form auto-backup-phrase");
   const p1 = input("", t("passphrase"), "password");
   const p2 = input("", t("again"), "password");
-  ed.append(...field(t("Passphrase"), p1, t("The sign-ins in each backup are sealed with it. Anyone with a backup and the passphrase can use those accounts. Keep it: without it a backup's sign-ins can't be opened.")),
+  ed.append(...field(t("Passphrase"), p1, part === "sessions" ? t("Keep this passphrase to restore your session backups.") : t("The sign-ins in each backup are sealed with it. Anyone with a backup and the passphrase can use those accounts. Keep it: without it a backup's sign-ins can't be opened.")),
     ...field("", p2));
   const go = el("button", "text primary", t("Turn on"));
   const cancel = el("button", "text", t("Cancel"));
@@ -298,7 +311,47 @@ function autoBackupPhraseForm() {
     if (!p1.value) return say(t("Pick a passphrase: the file is sealed with it"));
     if (p1.value !== p2.value) return say(t("The two passphrases differ"));
     autoBackupPhrase = false;
-    await autoBackupDo("set", { signIns: true, passphrase: p1.value }, go);
+    await autoBackupDo("set", { [part]: true, passphrase: p1.value }, go);
   };
   return ed;
+}
+
+function restoreAutoSessions(b) {
+  const ed = el("div", "editor restore-ask");
+  const options = ["Claude Code", "Codex"].map(name => {
+    const label = el("label","tick");
+    const checkbox = el("input");
+    checkbox.type = "checkbox";
+    label.append(checkbox, el("span","",name));
+    return {label, checkbox};
+  });
+  const targets = el("div","pair wrap");
+  targets.append(...options.map(o => o.label));
+  const folder = input("", t("Target project folder"));
+  const phrase = input("", t("Passphrase"), "password");
+  ed.append(el("b","",t("Restore sessions…")), ...field(t("Import into agents"),targets),
+    ...field(t("Target project folder"),folder), ...field(t("Passphrase"),phrase,t("Leave empty to use the saved passphrase.")));
+  const cancel = el("button","text",t("Cancel"));
+  const go = el("button","text primary",t("Import"));
+  const say = syncBar(ed,"",el("span","grow"),cancel,go);
+  go.disabled = true;
+  targets.onchange = () => {go.disabled = !options.some(o => o.checkbox.checked);};
+  cancel.onclick = closeConfirmAsk;
+  go.onclick = async () => {
+    cancel.disabled = go.disabled = true;
+    try {
+      const selected = ["claude","codex"].filter((_,i) => options[i].checkbox.checked);
+      const r = await api("autobackup/restore-sessions",{name:b.name,targets:selected,cwd:folder.value.trim(),passphrase:phrase.value});
+      const failure = r.imports?.find(x => x.error);
+      if (failure) throw new Error(failure.error);
+      closeConfirmAsk();
+      autoBackupSaid = [t("Restored session copies: {n}", {n:r.imports?.length || 0})];
+      renderSync();
+    } catch (e) {say(t(e.message));}
+    finally {cancel.disabled = go.disabled = false;}
+  };
+  confirmAsk=ed;
+  openModal(ed);
+  $("#modal").classList.add("lib");
+  cancel.focus(NO_SCROLL);
 }

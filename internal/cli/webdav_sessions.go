@@ -14,6 +14,9 @@ import (
 )
 
 func webdavSessionCmd(args []string) error {
+	if len(args) > 0 && args[0] == "auto-import" {
+		return webdavAutoImport(args[1:])
+	}
 	if len(args) == 1 && args[0] == "list" {
 		return json.NewEncoder(os.Stdout).Encode(sessions.BatchCandidates())
 	}
@@ -40,7 +43,7 @@ func webdavSessionCmd(args []string) error {
 		return webdavSessionBatch(args[1:])
 	}
 	if len(args) != 2 {
-		return errors.New("usage: magpie webdav sessions list | backups | sync | delete <id> local|webdav | batch [options] | push|pull <Codex session ID>")
+		return errors.New("usage: magpie webdav sessions list | backups | sync | auto-import | delete <id> local|webdav | batch [options] | push|pull <Codex session ID>")
 	}
 	res, err := davsync.TransferCodexSession(context.Background(), args[0], args[1])
 	if err != nil {
@@ -103,4 +106,41 @@ func webdavSessionBatch(args []string) error {
 		}
 	}
 	return nil
+}
+
+// Configure the same per-device destinations and optional project folder as Settings.
+func webdavAutoImport(args []string) error {
+	prefs, err := davsync.LoadSessionPreferences()
+	if err != nil {
+		return err
+	}
+	if len(args) == 0 {
+		return json.NewEncoder(os.Stdout).Encode(struct {
+			On      bool     `json:"on"`
+			Targets []string `json:"targets"`
+			Cwd     string   `json:"cwd,omitempty"`
+		}{prefs.AutoImport, prefs.Targets, prefs.Cwd})
+	}
+	if len(args) == 1 && args[0] == "off" {
+		prefs.AutoImport = false
+		return davsync.SaveSessionPreferences(prefs)
+	}
+	flags := flag.NewFlagSet("magpie webdav sessions auto-import", flag.ContinueOnError)
+	to := flags.String("to", "", "comma-separated target agents")
+	cwd := flags.String("cwd", prefs.Cwd, "absolute destination project folder")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *to == "" {
+		return errors.New("use auto-import --to codex,claude [--cwd path], or auto-import off")
+	}
+	targets := strings.Split(*to, ",")
+	for i := range targets {
+		targets[i] = strings.TrimSpace(targets[i])
+	}
+	if err = sessions.CheckBatchTargets(targets, *cwd); err != nil {
+		return err
+	}
+	prefs.AutoImport, prefs.Targets, prefs.Cwd = true, targets, *cwd
+	return davsync.SaveSessionPreferences(prefs)
 }
