@@ -19,11 +19,14 @@ const { watchSettingsReads, agentRow, openAgentSettings } = require("./reader.cj
 
 const assets = path.resolve(__dirname, "../assets");
 
-function serve(lang, posts) {
+function serve(lang, posts, restartKind) {
   let settings = { theme: "light", lang, tray: "panel", currency: "usd", version: "0.1.900", dir: "~/.config/magpie", gateway: "http://127.0.0.1:3425", proxyNow: "none", proxySource: "none", visionModels: [], imageGenModels: [], titleModels: [], workbuddyCheckins: [], lanURLs: [], redactWords: [], trayUsageEvery: 3, compactAt: 400000 };
-  let nativeAccount = false, codexEnabled = true;
+  let nativeAccount = false, codexEnabled = true, staleCopy;
   const state = () => ({
-    agents: [agentRow("claude", "Claude Code"), { ...agentRow("codex", "Codex"), nativeAccount, enabled: codexEnabled, wired: codexEnabled && !nativeAccount }],
+    agents: [agentRow("claude", "Claude Code"), {
+      ...agentRow("codex", "Codex"), nativeAccount, enabled: codexEnabled, wired: codexEnabled && !nativeAccount,
+      staleCopies: codexEnabled && staleCopy ? [staleCopy] : [],
+    }],
     profiles: [], settings: { lang, theme: "light" },
   });
   return async (route) => {
@@ -36,7 +39,14 @@ function serve(lang, posts) {
       const body = req.postDataJSON();
       posts.push({ path: url.pathname, body });
       nativeAccount = body.on;
+      staleCopy = nativeAccount ? { kind: restartKind, since: "2026-11-01T00:00:00Z" } : undefined;
+      if (staleCopy && restartKind === "app") staleCopy.bundle = "/Applications/Codex.app";
       return json(state());
+    }
+    if (["/api/codex/app/reopen", "/api/codex/daemon/restart"].includes(url.pathname)) {
+      posts.push({ path: url.pathname, body: req.postDataJSON() });
+      staleCopy = undefined;
+      return json({});
     }
     if (["/api/agents/connect/codex", "/api/agents/disconnect/codex"].includes(url.pathname)) {
       codexEnabled = url.pathname.includes("/connect/");
@@ -91,8 +101,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         page.setDefaultTimeout(5000);
         page.setDefaultNavigationTimeout(60000);
         const errors = [], posts = [];
+        const restartKind = width === 900 ? "app" : "daemon";
+        const restartPath = restartKind === "app" ? "/api/codex/app/reopen" : "/api/codex/daemon/restart";
         page.on("pageerror", (e) => errors.push(e.message));
-        await page.route("**/*", serve(lang, posts));
+        await page.route("**/*", serve(lang, posts, restartKind));
         await watchSettingsReads(page);
         await page.goto("http://magpie.test/?view=agents");
         await openAgentSettings(page, "claude");
@@ -149,6 +161,17 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await codex.locator('.ag-conn[aria-checked="true"]').waitFor();
         await toggle.waitFor();
         assert(await toggle.isChecked(), "native mode retains an enabled agent's settings");
+        const restart = codex.getByRole("button", { name: lang === "zh" ? "重启 Codex" : "Restart Codex", exact: true });
+        const confirmation = page.getByRole("alertdialog");
+        await restart.click();
+        await confirmation.locator("button:not(.primary)").click();
+        assert.equal(posts.filter(p => p.path === restartPath).length, 0, "switching modes or cancelling must not send a restart");
+        await restart.click();
+        await confirmation.locator("button.primary").click();
+        await restart.waitFor({ state: "hidden" });
+        assert.deepEqual(posts.filter(p => p.path === restartPath), [{
+          path: restartPath, body: restartKind === "app" ? { bundle: "/Applications/Codex.app" } : {},
+        }]);
         await agentSwitch.click();
         await page.locator("button.agent-more[aria-expanded=false]").click();
         await codex.locator('.ag-conn[aria-checked="false"]').waitFor();

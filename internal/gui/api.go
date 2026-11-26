@@ -3469,20 +3469,23 @@ func state() stateJSON {
 		aj.Drift = a.Drift()
 		aj.Wired = a.Wired()
 		aj.Enabled = aj.Wired || a.NativeAccount() && a.Enabled()
-		if aj.Wired {
+		if aj.Enabled {
 			aj.StaleCopies = a.StaleCopies()
 			aj.Stale = len(aj.StaleCopies)
+		}
+		if aj.Wired {
 			aj.Joined = a.Joined != nil && a.Joined()
 			if a.AppOut != nil && a.AppOut() {
 				aj.AppOut = codexAppOut()
-			} else if a.ID == "codex" && a.WSL == "" {
-				aj.AppBack = provider.CodexAppBack()
 			}
 		} else {
 			aj.Source = a.Source()
 			aj.Failover = a.FailingOver != nil && a.FailingOver()
 		}
 		if a.ID == "codex" && a.WSL == "" {
+			if aj.Enabled && aj.AppOut == nil {
+				aj.AppBack = provider.CodexAppBack()
+			}
 			aj.AppSnag = provider.CodexAppSnagged()
 		}
 		aj.AppRestart = a.AppBehind()

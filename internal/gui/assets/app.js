@@ -1401,7 +1401,16 @@ function connectLine(a, kind) {
   }
   if (kind === "empty" && !switchable(a)) { say(t("Add a key or a subscription first; then there are models to connect")); return line; }
   if (a.appSnag) { say(t("The {agent} app hit an error · quit it and open it again", { agent: a.name }), "wait"); return line; }
-  if (a.nativeAccount && agentIsEnabled(a)) { say(t("Using native account"), "on"); return line; }
+  if (a.nativeAccount && agentIsEnabled(a)) {
+    const copies = a.staleCopies || [];
+    const app = copies.find(c => c.kind === "app" && c.bundle);
+    const daemon = copies.some(c => c.kind === "daemon");
+    say(t(a.appBack || copies.length ? "Using native account · restart Codex to apply" : "Using native account"), "on");
+    if (a.appBack) line.append(appBackRestart(t("Restart Codex")));
+    else if (app) line.append(appReopen(app.bundle, t("Restart Codex")));
+    if (daemon) line.append(daemonRestart(t(app || a.appBack ? "Restart background service" : "Restart Codex"), true));
+    return line;
+  }
   if (!a.wired && a.native && a.native.provider !== "disconnected") {
     say(t(a.native.detail), "bad");
     if (a.native.provider === "invalid") line.append(driftFix(a, "Reconnect"));
@@ -2009,11 +2018,12 @@ const desktopLongestLine = () => agSwitchLine("ag-longest", !!state.settings?.de
 
 // daemonRestart: the button that restarts Codex's background app-server
 // left on the old list, then shows the row as it is after
-function daemonRestart() {
-  const go = el("button", "ag-quiet accent", t("Restart"));
+function daemonRestart(label = t("Restart"), confirm = false) {
+  const go = el("button", "ag-quiet accent", label);
   go.type = "button";
   go.title = "codex app-server daemon restart";
   go.onclick = async () => {
+    if (confirm && !(await confirmRestart(t("Codex"), t("Restart it to use the new account. Running Codex sessions will be interrupted.")))) return;
     go.disabled = true;
     go.classList.add("busy");
     try {
@@ -2033,8 +2043,8 @@ function daemonRestart() {
 const confirmRestart = (name, why) => confirmAction(t("Restart {agent}?", { agent: name }), why || t("magpie quits {agent} and opens it again, so it reads the new settings. Anything running in it stops.", { agent: name }), t("Restart"));
 
 // appReopen: ends the Codex app's app-server, not its window
-function appReopen(bundle) {
-  const go = el("button", "ag-quiet accent", t("Restart"));
+function appReopen(bundle, label = t("Restart")) {
+  const go = el("button", "ag-quiet accent", label);
   go.type = "button";
   go.title = bundle;
   go.onclick = async () => {
@@ -2074,8 +2084,8 @@ function appBackSaid(a) {
 
 // appBackRestart: the Codex app's app-server restarted, so it reads its
 // ChatGPT account again, as the accounts' "still signed in as" Restart
-function appBackRestart() {
-  const go = el("button", "ag-quiet accent", t("Restart"));
+function appBackRestart(label = t("Restart")) {
+  const go = el("button", "ag-quiet accent", label);
   go.type = "button";
   go.onclick = async () => {
     if (!(await confirmRestart(t("The Codex app"), t("Only its app-server restarts, for its ChatGPT account; its window stays. A running turn stops.")))) return;
