@@ -20,7 +20,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { reach, openPart } = require("./reader.cjs");
+const { reach } = require("./reader.cjs");
 const { strings } = require("./strings.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -169,9 +169,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const exact = (s) => new RegExp("^" + s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$");
         const parts = (ps) => ps.map((p) => w({ providers: "providers", settings: "settings", library: "library" }[p])).join(w(", "));
 
-        await page.goto("http://magpie.test/");
-        await page.locator("#prefs").click();
-        await openPart(page, "sync");
+        await page.goto("http://magpie.test/?view=settings&tab=sync");
         const list = page.locator("#syncList");
         const first = list.locator(".row.pref").first();
         await first.waitFor({ state: "visible" });
@@ -196,7 +194,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await click(prov.locator("input"));
         await click(sets.locator("input"));
         await click(adv.locator("summary"));
-        const sessionSync = tickOf("Back up readable sessions on WebDAV sync").locator("input");
+        const sessionSync = tickOf("Sync readable sessions").locator("input");
         assert.equal(await sessionSync.isChecked(), false);
         await click(sessionSync);
         await noneWider(page, "#syncList .row.pref, #syncList .sync-form, #syncList .sync-form .bar > button");
@@ -250,7 +248,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await ask.waitFor({ state: "detached" });
         await undoRow.waitFor({ state: "detached" });
         assert.equal(await list.locator(".sync-preview-row").count(), 1, "Preview a sync gone after the undo");
-        const batch = list.locator(".sync-session-row", { hasText: w("Batch session backup and import") });
+        const batch = list.locator(".sync-session-row", { hasText: w("Session sync") });
+        const syncSessions = batch.getByRole("button", { name: w("Sync sessions now"), exact: true });
+        await click(syncSessions);
+        const confirmation = page.getByRole("alertdialog");
+        await confirmation.getByRole("button", { name: w("Cancel"), exact: true }).click();
+        await confirmation.waitFor({ state: "detached" });
+        assert.equal(all("/api/davsync/session-sync-start").length, 0, "cancel did not start a sync");
         await click(batch.getByRole("button",{name:w("Open"),exact:true}));
         const panel = list.locator(".session-batch-form");
         const sessions = panel.locator(".session-batch-sources .session-batch-choice");
@@ -285,8 +289,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
           await panel.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${width}-${lang}-session-batch.png`) });
         }
-        await click(panel.getByRole("button",{name:w("Sync local changes"),exact:true}));
-        const confirm = page.getByRole("alertdialog").getByRole("button",{name:w("Sync local changes"),exact:true});
+        await click(syncSessions);
+        const confirm = page.getByRole("alertdialog").getByRole("button",{name:w("Sync sessions now"),exact:true});
         await confirm.click();
         await batch.getByRole("button",{name:w("Retry now"),exact:true}).waitFor();
         await click(batch.getByRole("button", {name:w("Close"),exact:true}));
