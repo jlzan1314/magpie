@@ -4,6 +4,8 @@
 // works. {name} slots are filled by t(str, vars).
 const I18N = {
   zh: {
+    "Use native account": "使用原生账户",
+    "Use the account signed in to Codex. Session backups and data sync remain available.": "使用 Codex 中已登录的账户。会话备份和数据同步仍可使用。",
     "Manage session backups": "管理会话备份",
     "Sessions: sync local session changes, skipping files with matching remote size": "会话：增量同步本地会话变更，线上打包大小一致时跳过",
     "Sync local changes": "同步本地变更",
@@ -5646,6 +5648,8 @@ const I18N = {
     "taken out of this agent's model list": "已从这个 Agent 的模型列表中移除",
   },
   "zh-TW": {
+    "Use native account": "使用原生帳戶",
+    "Use the account signed in to Codex. Session backups and data sync remain available.": "使用 Codex 中已登入的帳戶。工作階段備份與資料同步仍可使用。",
     "Manage session backups": "管理工作階段備份",
     "Sessions: sync local session changes, skipping files with matching remote size": "工作階段：增量同步本機工作階段變更，線上打包大小一致時略過",
     "Sync local changes": "同步本機變更",
@@ -11272,6 +11276,8 @@ const I18N = {
     "taken out of this agent's model list": "已從這個 Agent 的模型列表中移除",
   },
   ja: {
+    "Use native account": "ネイティブアカウントを使用",
+    "Use the account signed in to Codex. Session backups and data sync remain available.": "Codex にサインインしているアカウントを使用します。セッションのバックアップとデータ同期は引き続き利用できます。",
     "Manage session backups": "セッションのバックアップを管理",
     "Sessions: sync local session changes, skipping files with matching remote size": "セッション：ローカル変更を差分同期し、リモートとサイズが一致するパック済みファイルをスキップ",
     "Sync local changes": "ローカル変更を同期",
@@ -16900,6 +16906,8 @@ const I18N = {
     "taken out of this agent's model list": "このエージェントのモデル一覧から外されています",
   },
   de: {
+    "Use native account": "Natives Konto verwenden",
+    "Use the account signed in to Codex. Session backups and data sync remain available.": "Das in Codex angemeldete Konto verwenden. Sitzungssicherung und Datensynchronisierung bleiben verfügbar.",
     "Manage session backups": "Sitzungssicherungen verwalten",
     "Sessions: sync local session changes, skipping files with matching remote size": "Sitzungen: lokale Änderungen inkrementell synchronisieren und gleich große gepackte Dateien überspringen",
     "Sync local changes": "Lokale Änderungen synchronisieren",

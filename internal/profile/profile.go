@@ -315,7 +315,7 @@ func ApplyFields(p map[string]string) (int, error) {
 		}
 		id, field := k[:i], k[i+1:]
 		a := agents[id]
-		if a == nil {
+		if a == nil || a.NativeAccount() {
 			continue
 		}
 		f := a.Field(field)

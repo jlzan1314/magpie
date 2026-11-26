@@ -930,7 +930,7 @@ func addLoginNamed(in *savedLogin) (using bool, err error) {
 	live, signedIn := liveLogin(l.Agent)
 	ls := readLogins()
 	l.User = codexName(ls, l)
-	using = !signedIn || sameLogin(live, l)
+	using = (!signedIn || sameLogin(live, l)) && !(l.Agent == "codex" && CodexNativeAccount())
 	if l.Agent == "claude" && claudeSetupToken(l.Auth) != "" {
 		// Claude Code itself can't be signed in to a setup-token: the
 		// account is magpie's alone, its own sign-in left as it is
@@ -966,7 +966,7 @@ func addLoginNamed(in *savedLogin) (using bool, err error) {
 	// Codex and magpie both read it, or the next look would read the old
 	// ones back over them
 	held := ""
-	if l.Agent == "codex" && !using && !l.AccessOnly {
+	if l.Agent == "codex" && !using && !l.AccessOnly && !CodexNativeAccount() {
 		held = codexHeldFolder(ls, l)
 		l.Home = held
 	}

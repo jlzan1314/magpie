@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/edit"
 )
 
@@ -137,11 +138,15 @@ type InstrFile struct {
 // wanted. A part the user edited in the file is left alone until the
 // project's text changes; one taken out of the file is written again.
 func (l *Library) syncProjectInstr(p *Project, fail func(what string, err error)) {
+	nativeCodex := agent.NativeAccountEnabled("codex")
 	text := markersOut(strings.TrimSpace(strings.ReplaceAll(p.Instr, "\r\n", "\n")))
 	wanted := map[string]bool{}
 	if text != "" {
 		renames := projectInstrRenames(p.InstrAgents)
 		for _, id := range p.InstrAgents {
+			if nativeCodex && id == "codex" {
+				continue
+			}
 			if rel := projectInstrRel(p.Dir, id, renames[id]); rel != "" {
 				wanted[rel] = true
 			}
@@ -157,6 +162,10 @@ func (l *Library) syncProjectInstr(p *Project, fail func(what string, err error)
 	// once nothing of the user's is in it
 	for _, f := range p.InstrFiles {
 		if wanted[f.Path] {
+			continue
+		}
+		if nativeCodex && slices.Contains(projectInstrNames["codex"], f.Path) {
+			kept = append(kept, f)
 			continue
 		}
 		abs := filepath.Join(p.Dir, filepath.FromSlash(f.Path))

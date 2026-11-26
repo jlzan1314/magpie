@@ -236,7 +236,35 @@ function ownFieldsFold(list, a) {
 }
 
 // Its own context windows come in the same sheet, last (agentwindow.js).
+function nativeAccountRow(a) {
+  const row = el("div", "row pref native-account");
+  const who = el("div", "who");
+  who.append(el("div", "name", t("Use native account")), el("div", "sub", t("Use the account signed in to Codex. Session backups and data sync remain available.")));
+  const [toggle, input] = tick(t("Use native account"), a.nativeAccount);
+  input.setAttribute("aria-label", t("Use native account"));
+  toggle.lastElementChild.hidden = true;
+  input.onchange = async () => {
+    const on = input.checked;
+    input.disabled = true;
+    try {
+      state = await api("agents/native-account/" + encodeURIComponent(a.id), { on });
+      a.nativeAccount = state.agents.find(item => item.id === a.id)?.nativeAccount ?? on;
+      status(t("Takes effect when {agent} next starts", { agent: a.name }), "ok");
+      if (view === "agents") renderAgents();
+    } catch (err) {
+      statusErr(err);
+    } finally {
+      input.checked = a.nativeAccount;
+      input.disabled = false;
+    }
+  };
+  row.append(who, el("div", "val"));
+  row.lastElementChild.append(toggle);
+  return row;
+}
+
 window.agentCompactFill = function (list, a, ids) {
+  if (a.nativeAccount != null) list.prepend(nativeAccountRow(a));
   if (ids.includes("fullContextRow")) compactFill(list, a);
   ownFieldsFold(list, a);
   if (a.fields.length) import("./agentwindow.js").then(() => agentWindowFill(list, a), () => {});

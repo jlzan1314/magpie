@@ -12,6 +12,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
+	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/backup"
 	"github.com/yetone/magpie/internal/sessions"
 )
@@ -69,6 +70,9 @@ func TestWebDAVCodexSessionTransfer(t *testing.T) {
 		}
 	}
 
+	if err := (&agent.Agent{ID: "codex", Name: "Codex"}).SetNativeAccount(true); err != nil {
+		t.Fatal(err)
+	}
 	write(source, first, true)
 	run(source, "push", 1)
 	run(source, "push", 0)

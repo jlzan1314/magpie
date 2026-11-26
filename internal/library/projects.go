@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/edit"
 )
 
@@ -211,6 +212,7 @@ func (l *Library) syncFolder(p *Project, res *Result, hubs map[string]*Server) {
 	fail := func(name string, err error) {
 		res.Problems = append(res.Problems, Problem{Agent: p.Dir, What: "project:" + name, Error: err.Error()})
 	}
+	nativeCodex := agent.NativeAccountEnabled("codex")
 	want := map[string]string{} // entry → the skill
 	// the entries given as copies: all of them in a project that takes
 	// copies, else those an agent reads that skips magpie's link there
@@ -222,6 +224,9 @@ func (l *Library) syncFolder(p *Project, res *Result, hubs map[string]*Server) {
 			continue
 		}
 		for _, id := range agents {
+			if id == "codex" && nativeCodex {
+				continue
+			}
 			if d := ProjectSkillsDir(id); d != "" {
 				e := d + "/" + name
 				want[e] = name
@@ -231,6 +236,12 @@ func (l *Library) syncFolder(p *Project, res *Result, hubs map[string]*Server) {
 	}
 	var placed []string
 	for _, e := range p.Placed {
+		if nativeCodex && strings.HasPrefix(e, ProjectSkillsDir("codex")+"/") {
+			if _, ok := want[e]; !ok {
+				placed = append(placed, e)
+				continue
+			}
+		}
 		if _, ok := want[e]; ok {
 			continue
 		}

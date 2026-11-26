@@ -154,6 +154,15 @@ func codexProfileIn(at place) *Agent {
 		Unwire: drop,
 		Routed: wired,
 		Sync: func() error {
+			nativeAccountMu.Lock()
+			defer nativeAccountMu.Unlock()
+			id := at.id
+			if id == "" {
+				id = "codex"
+			}
+			if NativeAccountEnabled(id) {
+				return nil
+			}
 			if !wired() {
 				// the profile names magpie and its list, but not a model
 				// magpie serves now (the provider of the model it was set

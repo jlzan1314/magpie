@@ -21,12 +21,23 @@ const assets = path.resolve(__dirname, "../assets");
 
 function serve(lang, posts) {
   let settings = { theme: "light", lang, tray: "panel", currency: "usd", version: "0.1.900", dir: "~/.config/magpie", gateway: "http://127.0.0.1:3425", proxyNow: "none", proxySource: "none", visionModels: [], imageGenModels: [], titleModels: [], workbuddyCheckins: [], lanURLs: [], redactWords: [], trayUsageEvery: 3, compactAt: 400000 };
+  let nativeAccount = false;
+  const state = () => ({
+    agents: [agentRow("claude", "Claude Code"), { ...agentRow("codex", "Codex"), nativeAccount }],
+    profiles: [], settings: { lang, theme: "light" },
+  });
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
     const json = (data) => route.fulfill({ json: data });
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:${JSON.stringify(lang)},theme:"light",web:true};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
-    if (url.pathname === "/api/state") return json({ agents: [agentRow("claude", "Claude Code"), agentRow("codex", "Codex")], profiles: [], settings: { lang, theme: "light" } });
+    if (url.pathname === "/api/state") return json(state());
+    if (url.pathname === "/api/agents/native-account/codex") {
+      const body = req.postDataJSON();
+      posts.push({ path: url.pathname, body });
+      nativeAccount = body.on;
+      return json(state());
+    }
     if (url.pathname === "/api/providers") return json({ providers: [], presets: [], excluded: [], gateway: { running: true, window: true } });
     if (url.pathname === "/api/groups") return json({ groups: [], models: [] });
     if (url.pathname === "/api/settings/agent-compact") {
@@ -120,6 +131,17 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // it fits a narrow window
         const over = await row.evaluate((r) => r.scrollWidth - r.clientWidth);
         assert(over <= 1, `the row overflows by ${over}px`);
+        assert.equal(await page.locator(".native-account").count(), 0);
+        await page.goto("http://magpie.test/?view=agents");
+        await openAgentSettings(page, "codex");
+        const toggle = page.locator('.row.agent[data-id="codex"] .ag-prefs .native-account input');
+        for (const enabled of [true, false]) {
+          await Promise.all([
+            page.waitForResponse(response => response.url().endsWith("/api/agents/native-account/codex") && response.ok()),
+            toggle.setChecked(enabled),
+          ]);
+        }
+        assert.deepEqual(posts.filter((entry) => entry.path === "/api/agents/native-account/codex").map((entry) => entry.body), [{ on: true }, { on: false }]);
         assert.deepEqual(errors, []);
       });
     }

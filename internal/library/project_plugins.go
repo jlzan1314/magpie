@@ -8,6 +8,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/yetone/magpie/internal/agent"
 )
 
 // A project's plugins (jinpwng on X): a plugin the library keeps is given
@@ -220,6 +222,9 @@ func (l *Library) syncProjectHooks(p *Project, fail func(what string, err error)
 			}
 		}
 	}) {
+		if id == "codex" && agent.NativeAccountEnabled("codex") {
+			continue
+		}
 		rel := projectHookFiles[id]
 		sp := projectHookSpec(p, id)
 		if sp == nil {

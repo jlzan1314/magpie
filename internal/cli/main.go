@@ -738,6 +738,22 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	if a.SupportsNativeAccount() && len(args) > 1 && args[1] == "native-account" {
+		switch {
+		case len(args) == 2:
+			if a.NativeAccount() {
+				fmt.Println("on")
+			} else {
+				fmt.Println("off")
+			}
+			return nil
+		case len(args) == 3 && (args[2] == "on" || args[2] == "off"):
+			return a.SetNativeAccount(args[2] == "on")
+		default:
+			return errors.New("usage: magpie codex native-account [on|off]")
+		}
+	}
+
 	// no agent form takes a flag: one is never set as a model or a value
 	// (`magpie snow --verbose` would take magpie out of Snow, #1457)
 	if f := flagArg(args[1:]); f != "" {

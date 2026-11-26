@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/claudelock"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
@@ -312,6 +313,9 @@ var codexOffRel = projectMCPFiles["codex"].rel
 // router serves isn't in it, and is left out of the project's hub entry
 // instead.
 func (l *Library) syncCodexOff(p *Project, fail func(what string, err error)) {
+	if agent.NativeAccountEnabled("codex") {
+		return
+	}
 	want := offFor(p.ServersOff, "codex")
 	if len(want) == 0 && len(p.CodexOff) == 0 {
 		return

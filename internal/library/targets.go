@@ -1101,6 +1101,15 @@ func targets(gone bool) []*Target {
 // starting the distro, but the page lists them (asleepView). Each running
 // one's places are kept for when it is stopped (keepShape).
 func targetsAsleep(gone bool) ([]*Target, []*agent.Agent) {
+	return collectTargets(gone, false)
+}
+
+func readableTargets() []*Target {
+	targets, _ := collectTargets(false, true)
+	return targets
+}
+
+func collectTargets(gone, readOnly bool) ([]*Target, []*agent.Agent) {
 	var out []*Target
 	var asleep []*agent.Agent
 	own := map[string]bool{}
@@ -1116,7 +1125,7 @@ func targetsAsleep(gone bool) ([]*Target, []*agent.Agent) {
 		}
 		// an app magpie also sets up as an agent (Claude Desktop) keeps its
 		// MCP servers where apps says, once
-		if own[a.ID] {
+		if own[a.ID] || (!gone && !readOnly && a.NativeAccount()) {
 			continue
 		}
 		// an uninstall that left the folder behind (#2177, #2173): the
@@ -1176,7 +1185,7 @@ func (l *Library) held(have []*Target) []*Target {
 	}
 	var out []*Target
 	for _, a := range append(apps(), agent.All()...) {
-		if in[a.ID] || a.WSL != "" || !has(a.ID) {
+		if in[a.ID] || a.WSL != "" || a.NativeAccount() || !has(a.ID) {
 			continue
 		}
 		in[a.ID] = true

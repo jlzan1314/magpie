@@ -2140,6 +2140,15 @@ func codexIn(at place) *Agent {
 			return ""
 		},
 		Sync: func() error {
+			nativeAccountMu.Lock()
+			defer nativeAccountMu.Unlock()
+			id := at.id
+			if id == "" {
+				id = "codex"
+			}
+			if NativeAccountEnabled(id) {
+				return nil
+			}
 			// a table an older magpie wrote for another app's provider
 			// goes, wired or not: Codex refuses its config with it
 			if err := tidyTables(); err != nil {
@@ -2676,7 +2685,12 @@ func codexIn(at place) *Agent {
 		a.viaProxy = func() (bool, bool, string, string) { return codexThroughProxy(path, at.gw()) }
 	}
 	// in a distro too: its way to Windows moves (wslFindVia)
-	a.move = func(from, to string) error { return codexMoveGateway(path, from, to) }
+	a.move = func(from, to string) error {
+		if a.NativeAccount() {
+			return nil
+		}
+		return codexMoveGateway(path, from, to)
+	}
 	return a
 }
 

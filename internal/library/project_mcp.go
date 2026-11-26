@@ -14,6 +14,7 @@ import (
 	toml "github.com/pelletier/go-toml/v2"
 	"github.com/tidwall/jsonc"
 
+	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/gateway"
 )
 
@@ -176,6 +177,15 @@ func (l *Library) syncProjectMCP(p *Project, hubs map[string]*Server, fail func(
 			}
 		}
 	}) {
+		if rel == codexOffRel && agent.NativeAccountEnabled("codex") {
+			if len(p.Wrote[rel]) > 0 {
+				wrote[rel] = p.Wrote[rel]
+			}
+			if len(p.Startup[rel]) > 0 {
+				startup[rel] = p.Startup[rel]
+			}
+			continue
+		}
 		format, ok := formatOfRel(rel)
 		if !ok {
 			continue
