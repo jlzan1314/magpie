@@ -138,7 +138,7 @@ func (p pickFolder) ChooseFolder(string) (string, error) { return p.dir, nil }
 // Settings' Back up by itself (jwaitq on Discord): a change sends only what
 // it changes, so the rest stays as the user set it; Change… takes a folder
 // from the picker; a backup made now is listed, and restoring it says which
-// backup of what was here undoes it.
+// backup of what was here undoes it. Deleting takes only the chosen file.
 func TestAutoBackupRoutes(t *testing.T) {
 	sandboxHome(t)
 	picked := t.TempDir()
@@ -183,6 +183,32 @@ func TestAutoBackupRoutes(t *testing.T) {
 	before, _ := r["before"].(string)
 	if !strings.HasSuffix(before, "-restore.json") || len(r["view"].(map[string]any)["backups"].([]any)) != 2 {
 		t.Fatalf("restore: %v", r)
+	}
+	bad := "magpie-20261125-110000-auto.json"
+	if err := os.WriteFile(filepath.Join(picked, bad), []byte("unrelated file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []string{bad, "../" + name, ""} {
+		body, _ := json.Marshal(map[string]string{"name": invalid})
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("POST", "/api/autobackup/delete", strings.NewReader(string(body))))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("attempt to delete %q: %d %s", invalid, rec.Code, rec.Body)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(picked, bad)); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"name":"` + name + `"}`
+	for range 2 {
+		v := call("/api/autobackup/delete", body)
+		list := v["backups"].([]any)
+		if len(list) != 1 || list[0].(map[string]any)["name"] != before {
+			t.Fatalf("after deleting %q: %v", name, v)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(picked, name)); !os.IsNotExist(err) {
+		t.Fatalf("deleted backup still exists or could not be checked: %v", err)
 	}
 	if v := call("/api/autobackup/set", `{"dir":""}`); v["custom"] != false || v["hours"] != 168.0 {
 		t.Fatalf("back to the default folder: %v", v)

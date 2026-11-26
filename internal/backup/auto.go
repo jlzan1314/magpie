@@ -553,6 +553,47 @@ func AutoNow(app string) (AutoBackup, error) {
 	return made, nil
 }
 
+// AutoDelete removes a listed backup by name from the configured folder.
+// A backup that was already removed or pruned is harmless to delete again.
+func AutoDelete(name string) error {
+	match := autoName.FindStringSubmatch(name)
+	if match == nil {
+		return errors.New("not a backup's name")
+	}
+	autoMu.Lock()
+	defer autoMu.Unlock()
+	c, err := LoadAuto()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(c.dir(), name)
+	defer delete(autoSeen, path)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !autoFileType(info.Mode().Type()) {
+		return ErrCorrupt
+	}
+	b, _, err := readAuto(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if b.Reason != match[3] {
+		return ErrCorrupt
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 // AutoRestore puts the backup by name back, every part, as an import does.
 // What is here now is backed up first (reason restore), so a restore is
 // undone by restoring that one; if it can't be, nothing is put back.
