@@ -553,3 +553,107 @@ func TestSessionSyncStatusRetiresOldSizeErrors(t *testing.T) {
 		t.Fatalf("current diagnostic: got %q, want %q", v.SessionsError, current)
 	}
 }
+
+func TestSessionSyncResumesPreparedBackup(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	upload, stop := context.WithCancel(context.Background())
+	defer stop()
+	fake := newSizeAwareDAV()
+	var writes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && writes.Add(1) == 2 {
+			_, _ = io.Copy(io.Discard, r.Body)
+			stop()
+			select {
+			case <-r.Context().Done():
+			case <-time.After(2 * time.Second):
+			}
+			return
+		}
+		fake.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+	cfg := Config{URL: server.URL + "/dav", User: "me", Password: "pw", Passphrase: "session resume test", Sessions: true}
+	if err := Configure(cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ = Load()
+	d, err := newDAV(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := batchStore{dav: d, passphrase: cfg.Passphrase, onPrepared: func(backup string) {
+		saveState(state{Key: stateKey(cfg), Sessions: &sessionSyncState{Pending: backup}})
+	}}
+	entries := []sessions.BatchConversation{
+		{Sources: []sessions.BatchSource{{Agent: "codex", ID: "one"}}, Parts: []sessions.Part{{Role: "user", Kind: "text", Text: "first"}}},
+		{Sources: []sessions.BatchSource{{Agent: "codex", ID: "two"}}, Parts: []sessions.Part{{Role: "user", Kind: "text", Text: "second"}}},
+	}
+	id, partial, err := store.save(upload, entries, true, batchPartSize)
+	if !errors.Is(err, context.Canceled) || partial.uploaded != 1 {
+		t.Fatalf("interrupted upload: %s, %+v, %v", id, partial, err)
+	}
+	st := loadState()
+	if id == "" || st.Sessions == nil || st.Sessions.Pending != id {
+		t.Fatalf("pending snapshot was not saved: %+v", st.Sessions)
+	}
+	// Existing installations retained the error URL before the pending
+	// field was added. The URL can identify the same local snapshot.
+	st.Sessions.Pending = ""
+	st.Sessions.Error = fmt.Sprintf("Put %q: context canceled", d.url(folder, batchDir, id, "conversation.sealed"))
+	saveState(st)
+	if got := Status().SessionsError; got != sessionUploadInterrupted {
+		t.Fatalf("interrupted status: %q", got)
+	}
+	result, err := SyncLocalSessions(context.Background())
+	if err != nil || result.Backup != id || !result.Remote || result.Skipped != 1 || result.Uploaded != 2 {
+		t.Fatalf("resume: %+v, %v", result, err)
+	}
+	st = loadState()
+	if st.Sessions.Pending != "" || st.Sessions.Backup != id || st.Sessions.Error != "" {
+		t.Fatalf("completed snapshot: %+v", st.Sessions)
+	}
+}
+
+func TestSessionUploadOutlivesSetupDeadline(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ctx := context.Background()
+	setup, expireSetup := context.WithCancel(ctx)
+	defer expireSetup()
+	fake := newSizeAwareDAV()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/"+batchDir+"/") {
+			expireSetup()
+		}
+		fake.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+	cfg := Config{URL: server.URL + "/dav", User: "me", Password: "pw", Passphrase: "separate session budget test", Sessions: true}
+	if err := Configure(cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ = Load()
+	d, err := newDAV(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := batchStore{dav: d, passphrase: cfg.Passphrase}
+	entry := sessions.BatchConversation{
+		Sources: []sessions.BatchSource{{Agent: "codex", ID: "session"}},
+		Parts:   []sessions.Part{{Role: "user", Kind: "text", Text: "prepared transcript"}},
+	}
+	id, _, err := store.save(ctx, []sessions.BatchConversation{entry}, false, batchPartSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveState(state{Key: stateKey(cfg), Sessions: &sessionSyncState{Pending: id}})
+	if err := syncNow(setup, ctx, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if setup.Err() == nil {
+		t.Fatal("fixture did not expire setup while the session was uploading")
+	}
+	if status := Status(); status.SessionsBackup != id || status.SessionsError != "" {
+		t.Fatalf("session upload shared the setup budget: backup %q, error %q", status.SessionsBackup, status.SessionsError)
+	}
+}

@@ -286,7 +286,13 @@ files and can be removed independently.
 The WebDAV advanced setting for sessions enables periodic backup of readable
 local conversations. The CLI equivalent is `magpie webdav set sessions=yes`.
 Use `magpie webdav sessions sync` for an immediate check. The result counts
-uploaded and skipped files, including the manifest. For mutable native Codex
+uploaded and skipped files, including the manifest. An interrupted session
+sync resumes the prepared local snapshot on the next run and skips objects
+already uploaded to the same backup. New local changes are captured on a
+subsequent run. An accepted batch upload can continue if Settings is closed or
+reloaded. Session transfers allow five minutes without transfer progress and
+two minutes for WebDAV metadata requests. Scheduled session sync has a
+separate six-hour budget and can resume if interrupted. For mutable native Codex
 sessions the shortcut also checks the local transcript fingerprint and the
 strong ETag of the last verified remote copy, preserving fork detection.
 

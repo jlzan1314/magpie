@@ -3,6 +3,7 @@ package davsync
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"strings"
 	"time"
 )
@@ -13,6 +14,30 @@ type sessionSyncState struct {
 	Uploaded int       `json:"uploaded,omitempty"`
 	Skipped  int       `json:"skipped,omitempty"`
 	Error    string    `json:"error,omitempty"`
+	Pending  string    `json:"pending,omitempty"`
+}
+
+const sessionUploadInterrupted = "Session backup upload was interrupted. The next sync will resume it."
+
+func (s sessionSyncState) interrupted() bool {
+	return s.Error == context.Canceled.Error() || s.Error == context.DeadlineExceeded.Error() ||
+		strings.HasSuffix(s.Error, ": "+context.Canceled.Error()) ||
+		strings.HasSuffix(s.Error, ": "+context.DeadlineExceeded.Error())
+}
+
+func (s sessionSyncState) pendingBackup() string {
+	if s.Pending != "" {
+		return s.Pending
+	}
+	// Versions without Pending kept the failing object's URL. Use its
+	// backup ID to find an already prepared local snapshot.
+	if s.interrupted() {
+		_, path, found := strings.Cut(s.Error, "/"+batchDir+"/")
+		if id, _, _ := strings.Cut(path, "/"); found && validBatchID(id) {
+			return id
+		}
+	}
+	return ""
 }
 
 func (s sessionSyncState) currentError() string {
@@ -21,6 +46,9 @@ func (s sessionSyncState) currentError() string {
 	if strings.HasSuffix(s.Error, ": session exceeds the 16 MiB portable transcript limit") ||
 		strings.HasSuffix(s.Error, ": session exceeds the 64 MiB uncompressed transcript limit") {
 		return ""
+	}
+	if s.interrupted() && s.pendingBackup() != "" {
+		return sessionUploadInterrupted
 	}
 	return s.Error
 }
@@ -67,7 +95,21 @@ func recordSessionSync(ctx context.Context, c Config, st *state, explicit bool) 
 		st.Sessions = &sessionSyncState{}
 	}
 	status := st.Sessions
-	result, err := runSessionBatch(ctx, c, SessionBatchRequest{All: true})
+	var result SessionBatchResult
+	var err error
+	status.Pending = status.pendingBackup()
+	if status.Pending != "" {
+		result, err = resumeSessionBatch(ctx, c, status.Pending)
+		if errors.Is(err, fs.ErrNotExist) {
+			status.Pending = ""
+		}
+	}
+	if status.Pending == "" {
+		result, err = runSessionBatch(ctx, c, SessionBatchRequest{All: true}, func(id string) {
+			status.Pending = id
+			saveState(*st)
+		})
+	}
 	if errors.Is(err, errEmptySessionBatch) && !explicit {
 		err = nil
 	}
@@ -76,6 +118,7 @@ func recordSessionSync(ctx context.Context, c Config, st *state, explicit bool) 
 		return result, err
 	}
 	status.Error = ""
+	status.Pending = ""
 	status.At = time.Now()
 	status.Backup = result.Backup
 	status.Uploaded, status.Skipped = result.Uploaded, result.Skipped

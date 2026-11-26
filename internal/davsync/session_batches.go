@@ -66,6 +66,7 @@ type batchStore struct {
 	dav        *dav
 	passphrase string
 	batchID    string
+	onPrepared func(string)
 }
 
 // RunSessionBatch captures selected local sessions and optional earlier
@@ -76,18 +77,19 @@ func RunSessionBatch(ctx context.Context, req SessionBatchRequest) (SessionBatch
 	if !ok || c.S3() || c.GitHub() {
 		return SessionBatchResult{}, errors.New("set up WebDAV sync before backing up sessions")
 	}
-	return runSessionBatch(ctx, c, req)
+	return runSessionBatch(ctx, c, req, nil)
 }
 
 var errEmptySessionBatch = errors.New("select sessions or a session backup")
 
-func runSessionBatch(ctx context.Context, c Config, req SessionBatchRequest) (SessionBatchResult, error) {
+func runSessionBatch(ctx context.Context, c Config, req SessionBatchRequest, onPrepared func(string)) (SessionBatchResult, error) {
+	ctx = withSessionDAVTimeouts(ctx)
 	var result SessionBatchResult
 	d, err := newDAV(c)
 	if err != nil {
 		return result, err
 	}
-	store := batchStore{dav: d, passphrase: c.Passphrase}
+	store := batchStore{dav: d, passphrase: c.Passphrase, onPrepared: onPrepared}
 	if err := sessions.CheckBatchTargets(req.Targets, strings.TrimSpace(req.Cwd)); err != nil {
 		return result, err
 	}
@@ -219,6 +221,16 @@ func (s batchStore) save(ctx context.Context, entries []sessions.BatchConversati
 	if !publish {
 		return s.batchID, stats, nil
 	}
+	if s.onPrepared != nil {
+		s.onPrepared(s.batchID)
+	}
+	return s.publish(ctx, objects)
+}
+
+// publish sends the prepared files and then the manifest. It is also the
+// resume path, where the manifest on disk supplies the same objects.
+func (s batchStore) publish(ctx context.Context, objects []batchObject) (string, batchPublishStats, error) {
+	var stats batchPublishStats
 	hint := filepath.Join(settings.Dir(), batchDir, "last-"+stateKey(Config{URL: s.dav.base.String(), User: s.dav.user, Passphrase: s.passphrase}))
 	last, _ := os.ReadFile(hint)
 	previous := s
@@ -315,6 +327,66 @@ func (s batchStore) copyObject(ctx context.Context, previous batchStore, object 
 
 var errSessionBackupMissing = errors.New("session backup was not found")
 
+func (m batchManifest) valid(version int) bool {
+	validVersion := m.Version == version || version == 2 && m.Version == 3
+	return validVersion && len(m.Entries) != 0 && (m.Version == 3) == (len(m.Parts) != 0)
+}
+
+// resumeSessionBatch publishes an already sealed local snapshot. Live Agent
+// history may have changed while the earlier upload was interrupted.
+func resumeSessionBatch(ctx context.Context, c Config, id string) (SessionBatchResult, error) {
+	ctx = withSessionDAVTimeouts(ctx)
+	var result SessionBatchResult
+	if !validBatchID(id) {
+		return result, errors.New("invalid pending session backup ID")
+	}
+	d, err := newDAV(c)
+	if err != nil {
+		return result, err
+	}
+	s := batchStore{dav: d, passphrase: c.Passphrase, batchID: id}
+	raw, err := readBatchFile(s.filename("backups", id))
+	if err != nil {
+		return result, err
+	}
+	var manifest batchManifest
+	if err := s.open(raw, id, &manifest); err != nil {
+		return result, err
+	}
+	if !manifest.valid(2) {
+		return result, errors.New("invalid session backup manifest")
+	}
+	var objects []batchObject
+	seen := make(map[string]bool)
+	for _, key := range manifest.Entries {
+		if !validBatchID(key) {
+			return result, errors.New("invalid session backup object ID")
+		}
+		parts, split := manifest.Parts[key]
+		if !split {
+			objects = append(objects, batchObject{"conversations", key})
+			continue
+		}
+		if len(parts) < 2 {
+			return result, errors.New("invalid session backup parts")
+		}
+		for _, part := range parts {
+			if !validBatchID(part) {
+				return result, errors.New("invalid session backup part ID")
+			}
+			if !seen[part] {
+				objects = append(objects, batchObject{"parts", part})
+				seen[part] = true
+			}
+		}
+	}
+	result.Conversations = len(manifest.Entries)
+	back, stats, err := s.publish(ctx, objects)
+	result.Backup, result.Remote = back, err == nil
+	result.Uploaded, result.Skipped = stats.uploaded, stats.skipped
+	return result, err
+}
+
 func (s batchStore) load(ctx context.Context, id string) ([]sessions.BatchConversation, error) {
 	s.batchID = id
 	var manifest batchManifest
@@ -327,8 +399,7 @@ func (s batchStore) load(ctx context.Context, id string) ([]sessions.BatchConver
 	if err != nil {
 		return nil, err
 	}
-	validVersion := manifest.Version == version || version == 2 && manifest.Version == 3
-	if !validVersion || len(manifest.Entries) == 0 || (manifest.Version == 3) != (len(manifest.Parts) != 0) {
+	if !manifest.valid(version) {
 		return nil, errors.New("invalid session backup manifest")
 	}
 	out := make([]sessions.BatchConversation, 0, len(manifest.Entries))

@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,12 @@ import (
 	"github.com/yetone/magpie/internal/sessions"
 	"github.com/yetone/magpie/internal/settings"
 )
+
+// The user confirms a backup before it starts. Reloading its Settings
+// page does not end a transfer that the application has already accepted.
+func sessionUploadContext(ctx context.Context) context.Context {
+	return context.WithoutCancel(ctx)
+}
 
 // backupRoutes are the Settings page's Export and Import, and the WebDAV
 // sync set up there.
@@ -256,7 +263,7 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 				fail(rw, err)
 				return
 			}
-			result, err := davsync.RunSessionBatch(ctx, in)
+			result, err := davsync.RunSessionBatch(sessionUploadContext(ctx), in)
 			out := struct {
 				davsync.SessionBatchResult
 				Failure string `json:"failure,omitempty"`
@@ -267,7 +274,7 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 			writeJSON(rw, out)
 			return
 		case "session-sync":
-			result, err := davsync.SyncLocalSessions(ctx)
+			result, err := davsync.SyncLocalSessions(sessionUploadContext(ctx))
 			out := struct {
 				davsync.SessionBatchResult
 				Failure string `json:"failure,omitempty"`
