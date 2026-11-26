@@ -25,6 +25,9 @@ import (
 const batchDir = "session-batches-v2"
 const legacyBatchDir = "session-batches-v1"
 const batchPlainLimit = 2 * sessions.MaxBatchConversation
+const batchPackedLimit = 64 << 20
+
+var errBatchPackedTooLarge = errors.New("packed session backup exceeds 64 MiB")
 
 type SessionBatchRequest struct {
 	Sources []sessions.BatchSource `json:"sources"`
@@ -332,6 +335,9 @@ func (s batchStore) keepLocal(kind, id string, plain []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(raw) > batchPackedLimit {
+		return nil, errBatchPackedTooLarge
+	}
 	return raw, writeBatchFile(p, raw)
 }
 
@@ -352,11 +358,9 @@ func readBatchFile(p string) ([]byte, error) {
 }
 
 func readBatchLimited(r io.Reader) ([]byte, error) {
-	// Base64 and the encrypted envelope cost more bytes than gzip itself.
-	limit := int64(2 * batchPlainLimit)
-	raw, err := io.ReadAll(io.LimitReader(r, limit+1))
-	if err == nil && int64(len(raw)) > limit {
-		err = errors.New("session backup object is too large")
+	raw, err := io.ReadAll(io.LimitReader(r, batchPackedLimit+1))
+	if err == nil && len(raw) > batchPackedLimit {
+		err = errBatchPackedTooLarge
 	}
 	return raw, err
 }

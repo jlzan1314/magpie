@@ -32,6 +32,7 @@ const tr = (lang, k, vars = {}) => {
 };
 
 const minAgo = new Date(Date.now() - 60000).toISOString();
+const longSessionError = "Could not read the session " + "unbroken-session-id".repeat(18);
 const base = { on: true, kind: "webdav", url: "https://dav.example.invalid/dav/", user: "me", passwordSet: true, passphraseSet: true, keys: true, agents: true, library: true, memory: true, last: minAgo, applied: { at: minAgo, parts: ["library"] } };
 const plan = (token) => ({
   token,
@@ -55,7 +56,7 @@ function serve(lang, posts) {
     gateway: "http://127.0.0.1:3425", visionModels: [], imageGenModels: [],
     fx: { rate: 7.2, stale: false },
   };
-  let sync = { ...base };
+  let sync = { ...base, sessionsError: longSessionError };
   let tokens = 0, previewed = 0, undos = 0;
   return async (route) => {
     const request = route.request();
@@ -70,7 +71,10 @@ function serve(lang, posts) {
     if (pathname === "/api/groups") return json({ groups: [], models: [] });
     if (pathname === "/api/plugins") return json({ plugins: [] });
     if (pathname === "/api/davsync") return json(sync);
-    if (pathname === "/api/davsync/session-candidates") return json({ sources: [{agent:"codex",id:"sample",title:"Example session"}], targets:["codex"] });
+    if (pathname === "/api/davsync/session-candidates") return json({
+      sources: [{ agent: "codex", id: "sample", title: "Long title ".repeat(18), cwd: "/project/" + "directory".repeat(28) }],
+      targets: ["codex"],
+    });
     if (pathname === "/api/davsync/session-sync") {
       post();
       return json({backup:"example", remote:true, conversations:1, uploaded:0, skipped:2});
@@ -228,6 +232,22 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const batch = list.locator(".sync-session-row", { hasText: w("Batch session backup and import") });
         await click(batch.getByRole("button"));
         const panel = list.locator(".session-batch-form");
+        await panel.locator(".session-batch-sources .session-batch-choice").waitFor();
+        const geometry = await panel.evaluate((form) => {
+          const [sources, destinations] = form.querySelectorAll("fieldset");
+          const backup = form.querySelector("textarea");
+          const list = sources.querySelector(".session-batch-sources");
+          const err = document.querySelector(".session-batch-error");
+          const box = (node) => node.getBoundingClientRect();
+          return {
+            fullWidth: box(sources).width >= box(form).width - 40 && box(destinations).width === box(sources).width,
+            separateRows: box(backup).top >= box(sources).bottom && box(destinations).top >= box(backup).bottom,
+            listFits: list.scrollWidth <= list.clientWidth + 1,
+            errorFits: err.scrollWidth <= err.clientWidth + 1,
+          };
+        });
+        assert.deepEqual(geometry, { fullWidth: true, separateRows: true, listFits: true, errorFits: true });
+        await noneWider(page, ".session-batch-form, .session-batch-form fieldset, .session-batch-form .bar > button");
         await click(panel.getByRole("button",{name:w("Sync local changes"),exact:true}));
         const confirm = page.getByRole("alertdialog").getByRole("button",{name:w("Sync local changes"),exact:true});
         await confirm.click();

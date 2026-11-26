@@ -5818,21 +5818,38 @@ body.linux .action-confirm::backdrop { -webkit-backdrop-filter: none; backdrop-f
 .relay-line.err, .relay-part.err { color: var(--red); }
 .relay-wait { font-size: 12px; }
 
-.session-batch-form {
-  display: grid;
+.editor.sync-form.session-batch-form {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
   gap: 10px;
 }
 .session-batch-form fieldset {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
   min-inline-size: 0;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.session-batch-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
+  align-items: end;
+  gap: 8px;
 }
 .session-batch-sources {
-  max-block-size: 230px;
+  max-block-size: min(320px, 45vh);
   overflow-y: auto;
 }
+.session-batch-choice > input {
+  flex: none;
+}
 .session-batch-choice > span,
-.session-batch-output code {
+.session-batch-form code,
+.session-batch-error {
+  min-inline-size: 0;
   overflow-wrap: anywhere;
 }
 .session-batch-sources .session-batch-choice {
@@ -5841,9 +5858,15 @@ body.linux .action-confirm::backdrop { -webkit-backdrop-filter: none; backdrop-f
 .session-batch-form [hidden] {
   display: none;
 }
-.session-batch-field {
+.session-batch-form .session-batch-field {
   display: grid;
   gap: 4px;
+  min-inline-size: 0;
+  text-align: start;
+}
+.session-batch-form :is(.session-batch-field > :is(input, select, textarea), .session-batch-filters > input) {
+  box-sizing: border-box;
+  inline-size: 100%;
   min-inline-size: 0;
 }
 .session-batch-form .bar,

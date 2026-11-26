@@ -107,7 +107,7 @@ func TestSessionBatch(t *testing.T) {
 	}
 	codexNative := filepath.Join(from, "codex", "sessions", "2026", "11", "25", "rollout-2026-11-25T10-00-00-"+codexID+".jsonl")
 	claudeNative := filepath.Join(from, "claude", "projects", "example", claudeID+".jsonl")
-	writeCodex := func(reply string) {
+	writeCodex := func(replies ...string) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(codexNative), 0o700); err != nil {
 			t.Fatal(err)
@@ -116,7 +116,10 @@ func TestSessionBatch(t *testing.T) {
 {"timestamp":%q,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":%q}]}}
 {"timestamp":%q,"type":"event_msg","payload":{"type":"user_message","message":%q}}
 `, stamp, codexID, project, stamp, stamp, message, stamp, message)
-		if reply != "" {
+		for _, reply := range replies {
+			if reply == "" {
+				continue
+			}
 			lines += fmt.Sprintf(`{"timestamp":%q,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":%q}]}}
 `, stamp, reply)
 		}
@@ -249,4 +252,27 @@ func TestSessionBatch(t *testing.T) {
 		}
 	}
 	fake.mu.Unlock()
+
+	// The portable JSON also exceeds the old unpacked object limit, but
+	// the encrypted gzip object fits and another home can read it.
+	large := strings.Repeat("0123456789abcdef", (18<<20)/16)
+	writeCodex(large, "second "+large)
+	useHome(from)
+	big, err := RunSessionBatch(ctx, SessionBatchRequest{Sources: picked[:1]})
+	if err != nil || !big.Remote || big.Conversations != 1 {
+		t.Fatalf("long session upload: %+v, %v", big, err)
+	}
+	prefix := "/dav/" + folder + "/" + batchDir + "/" + big.Backup + "/"
+	fake.mu.Lock()
+	for p, raw := range fake.files {
+		if strings.HasPrefix(p, prefix) && len(raw) >= 16<<20 {
+			t.Errorf("compressible session object %s is still %d bytes", pathpkg.Base(p), len(raw))
+		}
+	}
+	fake.mu.Unlock()
+	useHome(t.TempDir())
+	read, err := RunSessionBatch(ctx, SessionBatchRequest{Backups: []string{big.Backup}})
+	if err != nil || read.Conversations != 1 {
+		t.Fatalf("long session download: %+v, %v", read, err)
+	}
 }
