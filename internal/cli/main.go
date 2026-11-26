@@ -790,7 +790,7 @@ func run(args []string) error {
 		// default is magpie's word in any case, as an agent's name and a
 		// field's are: magpie codex DEFAULT wrote model = "DEFAULT"
 		if strings.EqualFold(args[1], "default") {
-			if a.Wired() {
+			if a.Enabled() {
 				return disconnect(a)
 			}
 			return set(a, a.Fields[0].Key, "")
@@ -913,7 +913,7 @@ func showField(a *agent.Agent, f *agent.Field) error {
 // took the model they had set away with magpie's)
 func disconnect(a *agent.Agent) error {
 	before := a.Values()
-	if err := a.Disconnect(); err != nil {
+	if err := a.Disable(); err != nil {
 		return err
 	}
 	now := a.Values()

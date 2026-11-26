@@ -53,18 +53,21 @@ something else shows up as drift.
 
 ## Codex native account mode
 
-Turn on **Use native account** in Codex's Magpie agent settings or run
-`magpie codex native-account on`. Magpie restores the routing settings it
-took over. Restart open Codex clients to use the restored route. Magpie
-keeps the mode on this computer, with a separate choice for each WSL
-instance. Model settings and Library deployment to that Codex pause
-while the mode is active. Session reading, backup, import and WebDAV
-sync continue through their usual permissions. Synced profiles and
-accounts stay available in Magpie. Codex keeps control of its own sign-in.
+Enable Codex on the Agents page, then choose **Use native account** in
+its settings. The Agent stays enabled and Magpie restores the routing
+settings it took over. Restart open Codex clients to use the restored
+route. Session reading, backup, import and WebDAV sync use their usual
+permissions. Library deployment and model writes pause in native mode.
 
-Turn off the mode with the same switch or run
-`magpie codex native-account off`. Use **Connect** to route Codex through
-Magpie again.
+Turn off **Use native account** to route an enabled Codex through
+Magpie again. The Agent's main switch can disable or re-enable Codex
+without changing its account mode. Existing native-account settings are
+treated as enabled. Each WSL instance keeps its own choice.
+
+`magpie codex native-account on` also enables Codex in native mode.
+`magpie codex native-account off` switches an enabled Codex to the
+Magpie route.
+
 
 ## Runtime path
 

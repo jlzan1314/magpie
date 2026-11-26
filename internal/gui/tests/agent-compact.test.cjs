@@ -21,9 +21,9 @@ const assets = path.resolve(__dirname, "../assets");
 
 function serve(lang, posts) {
   let settings = { theme: "light", lang, tray: "panel", currency: "usd", version: "0.1.900", dir: "~/.config/magpie", gateway: "http://127.0.0.1:3425", proxyNow: "none", proxySource: "none", visionModels: [], imageGenModels: [], titleModels: [], workbuddyCheckins: [], lanURLs: [], redactWords: [], trayUsageEvery: 3, compactAt: 400000 };
-  let nativeAccount = false;
+  let nativeAccount = false, codexEnabled = true;
   const state = () => ({
-    agents: [agentRow("claude", "Claude Code"), { ...agentRow("codex", "Codex"), nativeAccount }],
+    agents: [agentRow("claude", "Claude Code"), { ...agentRow("codex", "Codex"), nativeAccount, enabled: codexEnabled, wired: codexEnabled && !nativeAccount }],
     profiles: [], settings: { lang, theme: "light" },
   });
   return async (route) => {
@@ -36,6 +36,10 @@ function serve(lang, posts) {
       const body = req.postDataJSON();
       posts.push({ path: url.pathname, body });
       nativeAccount = body.on;
+      return json(state());
+    }
+    if (["/api/agents/connect/codex", "/api/agents/disconnect/codex"].includes(url.pathname)) {
+      codexEnabled = url.pathname.includes("/connect/");
       return json(state());
     }
     if (url.pathname === "/api/providers") return json({ providers: [], presets: [], excluded: [], gateway: { running: true, window: true } });
@@ -134,13 +138,28 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(await page.locator(".native-account").count(), 0);
         await page.goto("http://magpie.test/?view=agents");
         await openAgentSettings(page, "codex");
-        const toggle = page.locator('.row.agent[data-id="codex"] .ag-prefs .native-account input');
-        for (const enabled of [true, false]) {
-          await Promise.all([
-            page.waitForResponse(response => response.url().endsWith("/api/agents/native-account/codex") && response.ok()),
-            toggle.setChecked(enabled),
-          ]);
-        }
+        const codex = page.locator('.row.agent[data-id="codex"]');
+        const toggle = codex.locator(".ag-prefs .native-account input");
+        const agentSwitch = codex.locator(".ag-conn");
+        const changeMode = (on) => Promise.all([
+          page.waitForResponse(response => response.url().endsWith("/api/agents/native-account/codex") && response.ok()),
+          toggle.setChecked(on),
+        ]);
+        await changeMode(true);
+        await codex.locator('.ag-conn[aria-checked="true"]').waitFor();
+        await toggle.waitFor();
+        assert(await toggle.isChecked(), "native mode retains an enabled agent's settings");
+        await agentSwitch.click();
+        await page.locator("button.agent-more[aria-expanded=false]").click();
+        await codex.locator('.ag-conn[aria-checked="false"]').waitFor();
+        await agentSwitch.click();
+        await codex.locator('.ag-conn[aria-checked="true"]').waitFor();
+        await toggle.waitFor();
+        assert(await toggle.isChecked(), "re-enabling Codex preserves native mode");
+        await changeMode(false);
+        await codex.locator('.ag-conn[aria-checked="true"]').waitFor();
+        await agentSwitch.click();
+        await page.locator(".disconnect-ask").waitFor();
         assert.deepEqual(posts.filter((entry) => entry.path === "/api/agents/native-account/codex").map((entry) => entry.body), [{ on: true }, { on: false }]);
         assert.deepEqual(errors, []);
       });
