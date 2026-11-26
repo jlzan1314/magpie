@@ -71,6 +71,7 @@ function serve(lang, posts) {
         view = { ...view, backups: [before, ...view.backups] };
         return json({ view, before: before.name, result: { Added: 0, Replaced: 2, Profiles: 1, Agents: 0, Settings: true } });
       }
+      if (action === "delete") view = { ...view, backups: view.backups.filter(b => b.name !== body.name) };
       return json(view);
     }
     if (pathname.startsWith("/api/")) return json({});
@@ -212,6 +213,18 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const undo = lang === "en" ? "What was here before is the version of {when}: restore it to undo." : I18N[lang]["What was here before is the version of {when}: restore it to undo."];
         for (const part of undo.split("{when}")) assert.ok(said.includes(part), part + " in " + said);
         assert.equal(await list.locator(".auto-backup-version").count(), 3, "the backup made first is listed, to undo with");
+
+        const remove = list.locator(".auto-backup-version").last().getByRole("button", { name: w("Delete"), exact: true });
+        const confirmation = page.getByRole("alertdialog");
+        await remove.click();
+        await confirmation.getByRole("button", { name: w("Cancel"), exact: true }).click();
+        assert.equal(posts.filter(p => p.action === "delete").length, 0);
+        await remove.click();
+        await confirmation.getByRole("button", { name: w("Delete"), exact: true }).click();
+        await list.locator(".auto-backup-version").nth(2).waitFor({ state: "detached" });
+        assert.deepEqual(posts.filter(p => p.action === "delete"), [{ action: "delete", body: { name: backups[1].name } }]);
+        assert.equal(await list.locator(".auto-backup-version").count(), 2);
+        assert.ok((await sub(versions)).startsWith(w("{n} backups · newest {when}", { n: 2, when: "" }).trim()));
         assert.deepEqual(errors, []);
       });
     }

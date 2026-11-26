@@ -179,6 +179,8 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 			}
 		case "now":
 			_, err = backup.AutoNow(Version)
+		case "delete":
+			err = backup.AutoDelete(in.Name)
 		case "reveal":
 			dir := backup.AutoStatus().Dir
 			if err = os.MkdirAll(dir, 0o700); err == nil {

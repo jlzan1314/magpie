@@ -269,8 +269,12 @@ reasoning are outside the portable records.
 [RunSessionBatch](../../internal/davsync/session_batches.go) writes a local
 backup first. Each merged conversation is gzipped, encrypted with the
 existing sync passphrase and saved as a separate object. A manifest gives
-the backup its ID. For a two-way WebDAV computer, the conversation objects
-are published before the manifest. Magpie compares the sealed file length at
+the backup its ID. Each conversation can contain up to 64 MiB of
+uncompressed transcript, with a separate 64 MiB limit on the encrypted
+object after compression. Readers from before this limit change may need
+an update to open larger conversation objects. For a two-way WebDAV
+computer, the conversation objects are published before the manifest.
+Magpie compares the sealed file length at
 its content-addressed destination using WebDAV metadata. A match skips the
 file body. A new backup can reuse an unchanged conversation from the last
 published backup using a server-side COPY. Servers without COPY receive a
@@ -386,13 +390,16 @@ clock.
   is here (and stops if that fails), then `Restore(bundle, All)`, which is
   additive: providers added since stay, each keeps its local key. Restoring
   the `-restore` file undoes it.
+- **Delete:** `AutoDelete(name)` permanently removes the selected valid backup
+  file from the configured backup folder. The Versions list refreshes after
+  confirmation. The action is available while scheduled backups are off.
 - **API:** `GET /api/autobackup`; `POST /api/autobackup/{set,choose,now,
-  reveal,restore}`. `set` changes only the fields sent; `dir ""` is the
+  reveal,restore,delete}`. `set` changes only the fields sent; `dir ""` is the
   default folder. Settings draws it under Sync's Export and Import from the
   lazy [`autobackup.js`](../../internal/gui/assets/autobackup.js).
   Its Versions row says how many and the newest (a state, kept in sight
   where Settings' hints rest out of it) and folds the versions, each with
-  Restore…, until its name or that line is clicked; the fold is kept over
+  Restore… and Delete, until its name or that line is clicked; the fold is kept over
   redraws for the window's life (chen2652 on Discord,
   `auto-backup.test.cjs`). The status's `inside` says the folder is `settings.Dir()` or in it (letter
   case aside off Linux), the default included; Settings then says under the

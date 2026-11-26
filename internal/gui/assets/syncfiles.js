@@ -655,7 +655,8 @@ window.sessionBatchForm = function (followsServer) {
   everyAgent.value = "";
   agents.input.append(everyAgent);
   const sources = el("fieldset");
-  sources.append(el("legend", "", t("Sessions")), all.label, agents.label, search, sourceList);
+  const filters = el("div", "session-batch-filters", agents.label, search);
+  sources.append(el("legend", "", t("Sessions")), all.label, filters, sourceList);
 
   const back = batchField(t("Existing backup IDs"), "textarea");
   back.input.rows = 2;
@@ -796,7 +797,7 @@ function batchField(text, type) {
 }
 
 function showBatchFailure(out, error) {
-  out.append(el("div", "bad wraps", t(error)));
+  out.append(el("div", "sub bad wraps session-batch-error", t(error)));
 }
 
 function showBatchResult(out, r) {

@@ -34,7 +34,10 @@ window.autoBackupFill = function (at) {
   if (Date.now() - autoBackupAt >= 30000) {
     autoBackupAt = Date.now();
     const load = Promise.all([
-      api("autobackup").then((v) => { autoBackupView = v; }, (e) => { autoBackupView = { error: e.message, backups: [] }; }),
+      api("autobackup").then(
+        (v) => { if (autoBackupLoad === load) autoBackupView = v; },
+        (e) => { if (autoBackupLoad === load) autoBackupView = { error: e.message, backups: [] }; },
+      ),
       api("datafolder").then((d) => { dataFolderView = d; }, () => {}),
     ]);
     autoBackupLoad = load;
@@ -48,6 +51,7 @@ async function autoBackupDo(action, body, b) {
   b?.classList.add("busy");
   try {
     autoBackupView = await api("autobackup/" + action, body || {});
+    autoBackupLoad = null;
     autoBackupAt = Date.now();
   } catch (e) {
     statusErr(e);
@@ -133,7 +137,14 @@ function autoBackupRows(v) {
     const what = [t(b.providers === 1 ? "1 provider" : "{n} providers", { n: b.providers })];
     if (b.reason === "restore") what.unshift(t("What was here before a restore"));
     if (b.signIns) what.push(t("sign-ins"));
-    row(when, what.join(" · "), btn(t("Restore…"), () => autoBackupAsk(b, when))).classList.add("auto-backup-version");
+    const remove = btn(t("Delete"), async (button) => {
+      if (!await confirmAction(t("Delete the backup of {when}?", { when }),
+        t("This permanently deletes the selected file from your backup folder."), t("Delete"))) return;
+      button.disabled = true;
+      await autoBackupDo("delete", { name: b.name }, button);
+    });
+    remove.classList.add("danger");
+    row(when, what.join(" · "), btn(t("Restore…"), () => autoBackupAsk(b, when)), remove).classList.add("auto-backup-version");
   }
   return rows;
 }
