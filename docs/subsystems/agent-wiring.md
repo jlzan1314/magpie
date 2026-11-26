@@ -55,9 +55,12 @@ something else shows up as drift.
 
 Enable Codex on the Agents page, then choose **Use native account** in
 its settings. The Agent stays enabled and Magpie restores the routing
-settings it took over. Restart open Codex clients to use the restored
-route. Session reading, backup, import and WebDAV sync use their usual
-permissions. Library deployment and model writes pause in native mode.
+settings it took over. When a running Codex app or managed app-server
+can be restarted from the Agents page, choose **Restart Codex** and
+confirm. Reopen a terminal session or reload an editor window to apply
+the restored route there. Session reading, backup, import and WebDAV
+sync use their usual permissions. Library deployment and model writes
+pause in native mode.
 
 Turn off **Use native account** to route an enabled Codex through
 Magpie again. The Agent's main switch can disable or re-enable Codex

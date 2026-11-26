@@ -5,6 +5,9 @@
 const I18N = {
   zh: {
     "Using native account": "正在使用原生账户",
+    "Using native account · restart Codex to apply": "已切换到原生账户 · 重启 Codex 后生效",
+    "Restart Codex": "重启 Codex",
+    "Restart background service": "重启后台服务",
     "Enable agent": "启用 Agent",
     "Disable agent": "关闭 Agent",
     "Agent disabled": "已关闭 Agent",
@@ -5653,6 +5656,9 @@ const I18N = {
   },
   "zh-TW": {
     "Using native account": "正在使用原生帳戶",
+    "Using native account · restart Codex to apply": "已切換到原生帳戶 · 重新啟動 Codex 後生效",
+    "Restart Codex": "重新啟動 Codex",
+    "Restart background service": "重新啟動後臺服務",
     "Enable agent": "啟用 Agent",
     "Disable agent": "關閉 Agent",
     "Agent disabled": "已關閉 Agent",
@@ -11285,6 +11291,9 @@ const I18N = {
   },
   ja: {
     "Using native account": "ネイティブアカウントを使用中",
+    "Using native account · restart Codex to apply": "ネイティブアカウントに切り替えました · Codex の再起動後に反映されます",
+    "Restart Codex": "Codex を再起動",
+    "Restart background service": "バックグラウンドサービスを再起動",
     "Enable agent": "エージェントを有効にする",
     "Disable agent": "エージェントを無効にする",
     "Agent disabled": "エージェントを無効にしました",
@@ -16919,6 +16928,9 @@ const I18N = {
   },
   de: {
     "Using native account": "Natives Konto wird verwendet",
+    "Using native account · restart Codex to apply": "Zum nativen Konto gewechselt · Codex neu starten, um die Änderung zu übernehmen",
+    "Restart Codex": "Codex neu starten",
+    "Restart background service": "Hintergrunddienst neu starten",
     "Enable agent": "Agent aktivieren",
     "Disable agent": "Agent deaktivieren",
     "Agent disabled": "Agent deaktiviert",
