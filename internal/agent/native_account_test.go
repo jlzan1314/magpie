@@ -22,7 +22,7 @@ func TestCodexNativeAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	codexAgent = codex(home)
-	if !codexAgent.NativeAccount() || codexAgent.Routed() || codexAgent.Wired() {
+	if !codexAgent.Enabled() || !codexAgent.NativeAccount() || codexAgent.Routed() || codexAgent.Wired() {
 		t.Fatalf("Codex did not return to its native route: %s", read())
 	}
 	config := read()
@@ -40,10 +40,23 @@ func TestCodexNativeAccount(t *testing.T) {
 	if err != nil || string(gotAuth) != auth {
 		t.Fatalf("native sign-in was not preserved: %v", err)
 	}
+	if err := codexAgent.Disable(); err != nil {
+		t.Fatal(err)
+	}
+	if codexAgent.Enabled() || !codexAgent.NativeAccount() || read() != config {
+		t.Fatal("disabling Codex should retain the native account preference and config")
+	}
+	if _, err := codexAgent.EnableHow(); err != nil {
+		t.Fatal(err)
+	}
+	if !codexAgent.Enabled() || !codexAgent.NativeAccount() || read() != config {
+		t.Fatal("enabling Codex again should keep the native route and config")
+	}
+	codexUsedUp = func() bool { return false }
 	if err := codexAgent.SetNativeAccount(false); err != nil {
 		t.Fatal(err)
 	}
-	if codexAgent.NativeAccount() || codexAgent.Routed() {
-		t.Fatal("turning off native mode should leave routing available for explicit connect")
+	if codexAgent.NativeAccount() || !codexAgent.Enabled() || !codexAgent.Routed() {
+		t.Fatal("turning off native mode should return the enabled agent to Magpie routing")
 	}
 }

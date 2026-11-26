@@ -714,7 +714,7 @@ function renderAgents() {
     }
     // connected to magpie or not, said under the name, with where the agent
     // picks among magpie's models itself
-    const sw = connectable(a) ? connectSwitch(a) : null;
+    const sw = connectable(a) || a.nativeAccount ? connectSwitch(a) : null;
     if (kind) {
       // Claude Code's tiers, subagents and auto mode have rows of their own
       // when opened
@@ -1217,25 +1217,27 @@ function libSwitch(cls, on, label) {
   b.append(el("i"));
   return b;
 }
+const agentIsEnabled = (a) => a.enabled || a.wired;
 function connectSwitch(a) {
-  const s = libSwitch("ag-conn", a.wired, t("Connect {agent} to magpie", { agent: a.name }));
-  s.title = a.wired ? t("Connected · switch off to put back what {agent} had before magpie", { agent: a.name }) : t("Switch on and {agent}'s model list gets magpie's models", { agent: a.name });
+  const enabled = agentIsEnabled(a);
+  const s = libSwitch("ag-conn", enabled, a.nativeAccount ? t("Enable agent") : t("Connect {agent} to magpie", { agent: a.name }));
+  s.title = a.nativeAccount ? t(enabled ? "Disable agent" : "Enable agent") : a.wired ? t("Connected · switch off to put back what {agent} had before magpie", { agent: a.name }) : t("Switch on and {agent}'s model list gets magpie's models", { agent: a.name });
   // the list opened from a failed connect, drawn again while it is open
-  if (!a.wired) holdAgentModels(a, s);
+  if (!enabled && !a.nativeAccount) holdAgentModels(a, s);
   s.onclick = async (e) => {
     e.stopPropagation();
-    if (a.wired) { askDisconnect(a); return; }
+    if (enabled && !a.nativeAccount) { askDisconnect(a); return; }
     if (s.disabled) return;
     s.disabled = true;
     s.classList.add("on");
     try {
-      state = await api("agents/connect/" + a.id, {});
+      state = await api("agents/" + (enabled ? "disconnect/" : "connect/") + a.id, {});
       renderAgents();
-      const msg = connectedSaid(a, state.connected);
+      const msg = a.nativeAccount ? t(enabled ? "Agent disabled" : "Using native account") : connectedSaid(a, state.connected);
       saidOk(msg, msg !== t("{agent} is connected to magpie", { agent: a.name }) ? 7000 : undefined);
     } catch (err) {
       s.disabled = false;
-      s.classList.remove("on");
+      s.classList.toggle("on", !!enabled);
       // every model taken out of its list: the Pick that puts one back is
       // in a connected agent's row only, so its list opens here (塔哥 on
       // Discord: Grok Build, all hidden, then switched off, couldn't be
@@ -1331,7 +1333,7 @@ const anyMagpieModels = () => state.agents.some((a) => connectField(a)?.options.
 function connectKind(a) {
   if (a.cliMissing) return "no";
   if (a.import) return "link";
-  if (connectable(a)) return "ok";
+  if (a.nativeAccount || connectable(a)) return "ok";
   if (NATIVE_ONLY[kindOf(a)]) return "no";
   if (a.fields.length && !anyMagpieModels()) return "empty";
   return "";
@@ -1399,6 +1401,7 @@ function connectLine(a, kind) {
   }
   if (kind === "empty" && !switchable(a)) { say(t("Add a key or a subscription first; then there are models to connect")); return line; }
   if (a.appSnag) { say(t("The {agent} app hit an error · quit it and open it again", { agent: a.name }), "wait"); return line; }
+  if (a.nativeAccount && agentIsEnabled(a)) { say(t("Using native account"), "on"); return line; }
   if (!a.wired && a.native && a.native.provider !== "disconnected") {
     say(t(a.native.detail), "bad");
     if (a.native.provider === "invalid") line.append(driftFix(a, "Reconnect"));
@@ -1570,17 +1573,17 @@ function connectRow(a, row, who, { fields, extras, fieldBtn, sw, kind }) {
   // its list open, what was picked there until the state has it
   if (agentModels?.a.id === a.id && agentModels.count) a.models = agentModels.count;
   row.classList.add("conn");
-  row.classList.toggle("unplugged", kind === "ok" && !a.wired);
+  row.classList.toggle("unplugged", kind === "ok" && !agentIsEnabled(a));
   who.classList.add("with-models");
   who.append(connectLine(a, kind));
   // a hidden one's Show centred in the row, as its switch is (#842)
   const back = who.querySelector(":scope > .ag-show");
   if (back) row.append(back);
   // the model it starts on, beside the switch; picked, it connects (the owner)
-  const start = kind === "ok" && !listsMenu(a) ? startField(a) : null;
+  const start = kind === "ok" && !a.nativeAccount && !listsMenu(a) ? startField(a) : null;
   if (start) fields.querySelector(`:scope > [data-key="${CSS.escape(start.key)}"]`)?.remove();
   if (kind === "ok") {
-    if (a.wired) {
+    if (agentIsEnabled(a)) {
       // a click on the row off its controls opens it, as on the Mac (NG_shiyu)
       const link = expandLink(a);
       row.append(link);
@@ -1616,17 +1619,17 @@ function connectRow(a, row, who, { fields, extras, fieldBtn, sw, kind }) {
     b.classList.add("ag-start");
     row.append(b, el("span", "ag-conn-gap"));
   } else row.append(el("span", "ag-cant", t("Can't connect")));
-  if (kind === "ok" && a.wired && agentExpanded === a.id) {
+  if (kind === "ok" && agentIsEnabled(a) && agentExpanded === a.id) {
     row.classList.add("expanded");
     // the speed its model goes at, beside Effort under New sessions
     fields.append(speedLazy(a));
-    row.append(connectPanel(a, { fields: fields.querySelector(".field") ? fields : null, extras, fieldBtn }));
+    row.append(connectPanel(a, { fields: !a.nativeAccount && fields.querySelector(".field") ? fields : null, extras, fieldBtn }));
   }
 }
 
 // Switch accounts only (the owner on X): a Claude Code or Codex not connected says its account
 let accountSwitched = null, panelAccts = null;
-const switchesAccounts = (a) => !a.wired && (a.id === "claude" || a.id === "codex");
+const switchesAccounts = (a) => !a.nativeAccount && !a.wired && (a.id === "claude" || a.id === "codex");
 
 function switchable(a) {
   if (!switchesAccounts(a)) return null;
@@ -2436,68 +2439,7 @@ function changesList(changes, back) {
 
 // askDisconnect takes magpie out of an agent's config once asked (agent.Disconnect)
 function askDisconnect(a) {
-  const ed = el("div", "editor disconnect-ask");
-  const head = el("div", "ehead");
-  head.append(icon(a.icon), el("b", "", t("Disconnect {agent} from magpie?", { agent: a.name })));
-  ed.append(head);
-  ed.append(el("p", "lib-confirm", t("{agent} goes back to how it was before it was connected; these are the places put back.", { agent: a.name })));
-  // what changes, line by line, read from a dry run on a copy (preview.go);
-  // where none can be had, the old words
-  const said = el("p", "lib-confirm", t("magpie takes its endpoint, key, models and effort out of {agent}'s config, restoring what it had. Providers and accounts stay.", { agent: a.name }));
-  const body = el("div", "ag-diff-wrap");
-  const show = (changes) => {
-    if (changes?.length) body.replaceChildren(changesList(changes, 1));
-    else body.replaceChildren(said);
-  };
-  if (previews[a.id]) show(previews[a.id]);
-  else body.append(el("div", "ag-diff-loading", t("Reading what changes…")));
-  let previewBlocked = !!a.native, revision = "", offline = false;
-  loadPreview(a).then((preview) => {
-    show(preview.changes);
-    revision = preview.revision;
-    previewBlocked = !!a.native && !revision;
-    go.disabled = previewBlocked;
-  }, (err) => { if (!a.native) { show(null); return; } previewBlocked = true; go.disabled = true; body.replaceChildren(el("p", "lib-confirm", t(err.message))); });
-  ed.append(body, el("p", "ag-note", t("The Library's MCP servers, skills and hooks stay")));
-  if (kindOf(a) === "codex") ed.append(el("p", "ag-note", t("magpie's provider table stays, so sessions opened on magpie's models still open")));
-  const bar = el("div", "bar");
-  const go = el("button", "text primary danger-fill", t("Disconnect and restore"));
-  go.disabled = previewBlocked;
-  go.onclick = async (e) => {
-    e.stopPropagation();
-    if (previewBlocked) return;
-    go.disabled = true;
-    go.classList.add("busy");
-    try {
-      state = await api("agents/" + (offline ? "disconnect-offline/" : "disconnect/") + a.id, offline ? { revision } : {});
-      closeConfirmAsk();
-      delete previews[a.id];
-      if (agentExpanded === a.id) agentExpanded = null;
-      renderAgents();
-      const msg = t(offline ? "Saved settings restored; magpie was removed from {agent}" : "{agent} no longer goes through magpie; its own settings are back", { agent: a.name });
-      saidOk(msg);
-    } catch (err) {
-      go.disabled = false;
-      go.classList.remove("busy");
-      if (!offline && err.code === "runtime_unavailable" && err.offline === "disconnect" && revision) {
-        offline = true;
-        head.querySelector("b").textContent = t("Restore saved settings and remove magpie?");
-        ed.querySelector(".lib-confirm").textContent = t("Restore saved settings and remove magpie without contacting Aside? Close Aside first if it is running.");
-        go.textContent = t("Restore saved settings and remove magpie");
-        cancel.focus(NO_SCROLL);
-        return;
-      }
-      status(t(err.message), "err");
-    }
-  };
-  const cancel = el("button", "text", t("Cancel"));
-  cancel.onclick = cancelAsk;
-  bar.append(reopenNote(a), el("span", "grow"), cancel, go);
-  ed.append(bar);
-  confirmAsk = ed;
-  openModal(ed);
-  $("#modal").classList.add("lib");
-  cancel.focus(NO_SCROLL);
+  import("./agentcompact.js").then(() => window.askAgentDisconnect(a), statusErr);
 }
 
 async function keepAgent(a) {
@@ -2895,7 +2837,7 @@ let panelOpenAgent = null; // the one agent row the panel has opened
 // set up: a model, a provider, a role given one, not an effort or a switch;
 // one with 「接入」's switch only when connected or drifted (#726).
 const tweak = (f) => toggled(f) || f.key === "effort" || f.key.endsWith("_effort");
-const onMagpie = (a) => !!(a.added || a.wired || a.drift);
+const onMagpie = (a) => !!(a.added || agentIsEnabled(a) || a.drift);
 // one whose only control is its launch command (Cursor Private Inference)
 // has nothing set to tell by, and stays up while it is there
 // one whose CLI is gone has nothing to set, and stays up only while
@@ -2930,7 +2872,7 @@ const isHidden = (a) => hiddenIds().includes(a.id);
 // unhideCleared: a hidden agent whose settings change so that nothing is set
 // on it any more goes under Not set up, its hiding dropped (Hu9956, #842):
 const agentSeen = new Map(); // each agent's settings when last rendered
-const agentSig = (a) => JSON.stringify([!!a.wired, !!a.added, !!a.drift, a.fields.filter((f) => !tweak(f)).map((f) => [f.key, f.value || ""])]);
+const agentSig = (a) => JSON.stringify([!!agentIsEnabled(a), !!a.nativeAccount, !!a.added, !!a.drift, a.fields.filter((f) => !tweak(f)).map((f) => [f.key, f.value || ""])]);
 function unhideCleared() {
   const hidden = hiddenIds();
   const cleared = [];

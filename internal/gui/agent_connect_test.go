@@ -73,7 +73,7 @@ func TestAgentConnectAPI(t *testing.T) {
 	}
 	call("/api/agents/connect/codex", "{}")
 	a = codex(call("/api/agents/native-account/codex", `{"on":true}`))
-	if a.NativeAccount == nil || !*a.NativeAccount || a.Wired || a.Fields[0].Value != "m2" {
+	if a.NativeAccount == nil || !*a.NativeAccount || !a.Enabled || a.Wired || a.Fields[0].Value != "m2" {
 		t.Fatalf("native mode did not restore Codex: %+v", a)
 	}
 	before, err := os.ReadFile(cfg)
@@ -81,7 +81,6 @@ func TestAgentConnectAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, endpoint := range []struct{ path, body string }{
-		{"/api/agents/connect/codex", "{}"},
 		{"/api/set", `{"agent":"codex","field":"model","value":"relay/m1"}`},
 	} {
 		rec := httptest.NewRecorder()
@@ -100,12 +99,17 @@ func TestAgentConnectAPI(t *testing.T) {
 	if err != nil || string(before) != string(after) {
 		t.Fatalf("applying synced data changed Codex config: %s %v", after, err)
 	}
-	a = codex(call("/api/agents/native-account/codex", `{"on":false}`))
-	if a.NativeAccount == nil || *a.NativeAccount || a.Wired {
-		t.Fatalf("disabling mode changed Codex routing: %+v", a)
+	a = codex(call("/api/agents/disconnect/codex", "{}"))
+	if a.Enabled || a.Wired || a.NativeAccount == nil || !*a.NativeAccount {
+		t.Fatalf("disabling agent lost its native preference: %+v", a)
 	}
-	if a = codex(call("/api/agents/connect/codex", "{}")); !a.Wired {
-		t.Fatal("explicit reconnect did not restore Magpie routing")
+	a = codex(call("/api/agents/connect/codex", "{}"))
+	if !a.Enabled || a.Wired || a.NativeAccount == nil || !*a.NativeAccount {
+		t.Fatalf("re-enabling agent changed the native route: %+v", a)
+	}
+	a = codex(call("/api/agents/native-account/codex", `{"on":false}`))
+	if a.NativeAccount == nil || *a.NativeAccount || !a.Enabled || !a.Wired {
+		t.Fatalf("switching routing mode should keep Codex enabled: %+v", a)
 	}
 
 }

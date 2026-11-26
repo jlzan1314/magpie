@@ -6,7 +6,10 @@ import (
 	"sync"
 )
 
-const nativeAccountKey = ".native_account"
+const (
+	nativeAccountKey         = ".native_account"
+	nativeAccountDisabledKey = ".native_account_disabled"
+)
 
 var nativeAccountMu sync.Mutex
 
@@ -24,6 +27,43 @@ func (a *Agent) NativeAccount() bool {
 	return a.SupportsNativeAccount() && NativeAccountEnabled(a.ID)
 }
 
+func (a *Agent) Enabled() bool {
+	if a.NativeAccount() {
+		return stashShared()[a.ID+nativeAccountDisabledKey] != "1"
+	}
+	return a.Wired()
+}
+
+func (a *Agent) EnableHow() (Connection, error) {
+	if !a.SupportsNativeAccount() {
+		return a.ConnectHow()
+	}
+	nativeAccountMu.Lock()
+	defer nativeAccountMu.Unlock()
+	if a.NativeAccount() {
+		if err := a.Disconnect(); err != nil {
+			return Connection{}, err
+		}
+		return Connection{How: "native-account"}, setNativeAccountState(a.ID, true, true)
+	}
+	return a.ConnectHow()
+}
+
+func (a *Agent) Disable() error {
+	if !a.SupportsNativeAccount() {
+		return a.Disconnect()
+	}
+	nativeAccountMu.Lock()
+	defer nativeAccountMu.Unlock()
+	if a.NativeAccount() {
+		if err := a.Disconnect(); err != nil {
+			return err
+		}
+		return setNativeAccountState(a.ID, true, false)
+	}
+	return a.Disconnect()
+}
+
 func (a *Agent) SetNativeAccount(on bool) error {
 	if !a.SupportsNativeAccount() {
 		return errors.New("native account mode is unavailable for this agent")
@@ -33,32 +73,38 @@ func (a *Agent) SetNativeAccount(on bool) error {
 	}
 	nativeAccountMu.Lock()
 	defer nativeAccountMu.Unlock()
-	already := a.NativeAccount()
-	if !on && !already {
+	native, enabled := a.NativeAccount(), a.Enabled()
+	if !on && !native {
 		return nil
 	}
-	if err := setNativeAccountMark(a.ID, on); err != nil {
+	if err := setNativeAccountState(a.ID, on, true); err != nil {
 		return err
 	}
+	var err error
 	if on {
-		if err := a.Disconnect(); err != nil {
-			if !already {
-				return errors.Join(err, setNativeAccountMark(a.ID, false))
-			}
-			return err
-		}
+		err = a.Disconnect()
+	} else if enabled {
+		err = a.Connect()
+	}
+	if err != nil {
+		return errors.Join(err, setNativeAccountState(a.ID, native, enabled))
 	}
 	return nil
 }
 
-func setNativeAccountMark(id string, on bool) error {
+func setNativeAccountState(id string, native, enabled bool) error {
 	stashMu.Lock()
 	defer stashMu.Unlock()
 	stash := stashLoad()
-	if on {
+	if native {
 		stash[id+nativeAccountKey] = "1"
 	} else {
 		delete(stash, id+nativeAccountKey)
+	}
+	if native && !enabled {
+		stash[id+nativeAccountDisabledKey] = "1"
+	} else {
+		delete(stash, id+nativeAccountDisabledKey)
 	}
 	return stashWrite(stash)
 }

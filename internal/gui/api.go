@@ -212,6 +212,7 @@ type unservedJSON struct {
 
 type agentJSON struct {
 	NativeAccount *bool       `json:"nativeAccount,omitempty"`
+	Enabled       bool        `json:"enabled,omitempty"`
 	ID            string      `json:"id"`
 	Name          string      `json:"name"`
 	Icon          string      `json:"icon"`
@@ -1647,9 +1648,9 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			a.Keep()
 		case "connect":
 			var c agent.Connection
-			c, err = a.ConnectHow()
+			c, err = a.EnableHow()
 			how = &c
-			if err == nil {
+			if err == nil && a.Wired() {
 				resumeOnWire(a)
 			}
 		case "native-account":
@@ -1659,10 +1660,13 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 					err = errors.New("native account mode requires an on value")
 				} else {
 					err = a.SetNativeAccount(*request.On)
+					if err == nil && !*request.On && a.Wired() {
+						resumeOnWire(a)
+					}
 				}
 			}
 		case "disconnect":
-			err = a.Disconnect()
+			err = a.Disable()
 		default:
 			http.NotFound(rw, r)
 			return
@@ -3464,6 +3468,7 @@ func state() stateJSON {
 		aj.NoNames = a.NoNames
 		aj.Drift = a.Drift()
 		aj.Wired = a.Wired()
+		aj.Enabled = aj.Wired || a.NativeAccount() && a.Enabled()
 		if aj.Wired {
 			aj.StaleCopies = a.StaleCopies()
 			aj.Stale = len(aj.StaleCopies)
