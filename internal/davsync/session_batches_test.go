@@ -253,10 +253,10 @@ func TestSessionBatch(t *testing.T) {
 	}
 	fake.mu.Unlock()
 
-	// The portable JSON also exceeds the old unpacked object limit, but
-	// the encrypted gzip object fits and another home can read it.
+	// The transcript exceeds the old 64 MiB limit, but the encrypted gzip
+	// object fits and another home can read it.
 	large := strings.Repeat("0123456789abcdef", (18<<20)/16)
-	writeCodex(large, "second "+large)
+	writeCodex(large, "second "+large, "third "+large, "fourth "+large)
 	useHome(from)
 	big, err := RunSessionBatch(ctx, SessionBatchRequest{Sources: picked[:1]})
 	if err != nil || !big.Remote || big.Conversations != 1 {

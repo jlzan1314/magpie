@@ -1,11 +1,18 @@
 package davsync
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -371,12 +378,8 @@ func TestSessionBatchSkipAndLocalChangeSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifestPlain, err := store.open(manifestData, second.Backup)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var current batchManifest
-	if err := json.Unmarshal(manifestPlain, &current); err != nil {
+	if err := store.open(manifestData, second.Backup, &current); err != nil {
 		t.Fatal(err)
 	}
 	truncatedPath := "/dav/magpie/" + batchDir + "/" + second.Backup + "/" + current.Entries[0] + ".sealed"
@@ -434,5 +437,119 @@ func TestSessionBatchSkipAndLocalChangeSync(t *testing.T) {
 	v := Status()
 	if !v.Sessions || v.SessionsError != "" || v.SessionsBackup == "" || v.SessionsBackup == synced1.Backup {
 		t.Fatalf("unexpected Sessions status after SyncNow: %+v", v)
+	}
+}
+
+func TestSessionBatchParts(t *testing.T) {
+	const pass = "session part test passphrase"
+	ctx := context.Background()
+	fake := newSizeAwareDAV()
+	server := httptest.NewServer(fake)
+	defer server.Close()
+	c := Config{URL: server.URL + "/dav", User: "me", Password: "pw", Passphrase: pass}
+	d, err := newDAV(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	s := batchStore{dav: d, passphrase: pass}
+	// Use a small part size to exercise splitting without a large test upload.
+	content := make([]byte, 2048)
+	rng := rand.New(rand.NewPCG(1, 2))
+	for i := range content {
+		content[i] = byte(rng.Uint32())
+	}
+	entry := sessions.BatchConversation{
+		Sources: []sessions.BatchSource{{Agent: "codex", ID: "sample"}},
+		Parts:   []sessions.Part{{Role: "user", Kind: "text", Text: base64.StdEncoding.EncodeToString(content)}},
+	}
+	id, sent, err := s.save(ctx, []sessions.BatchConversation{entry}, true, 512)
+	if err != nil || sent.uploaded < 3 {
+		t.Fatalf("split backup upload: %+v, %v", sent, err)
+	}
+	saved, unchanged, err := s.save(ctx, []sessions.BatchConversation{entry}, true, 512)
+	if err != nil || saved != id || unchanged.uploaded != 0 || unchanged.skipped != sent.uploaded {
+		t.Fatalf("split backup repeat: %s, %+v, %v", saved, unchanged, err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	read, err := s.load(ctx, id)
+	if err != nil || len(read) != 1 || read[0].Fingerprint() != entry.Fingerprint() {
+		t.Fatalf("split backup read: %d conversations, %v", len(read), err)
+	}
+
+	s.batchID = id
+	var manifest batchManifest
+	if err := s.loadObject(ctx, "backups", id, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	parts := manifest.Parts[manifest.Entries[0]]
+	if manifest.Version != 3 || len(parts) < 2 {
+		t.Fatalf("split backup manifest: %+v", manifest)
+	}
+	first := "/" + strings.Join(append([]string{"dav", folder}, s.objectPath("parts", parts[0])...), "/")
+	second := "/" + strings.Join(append([]string{"dav", folder}, s.objectPath("parts", parts[1])...), "/")
+	fake.mu.Lock()
+	fake.files[first] = fake.files[second]
+	fake.mu.Unlock()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if _, err := s.load(ctx, id); err == nil || !strings.Contains(err.Error(), "part did not match its checksum") {
+		t.Fatalf("backup with a replaced part read without its checksum error: %v", err)
+	}
+}
+
+func TestSessionBatchVerifiesLargeGzipStream(t *testing.T) {
+	// An authenticated and valid JSON object that expands beyond the old
+	// 128 MiB limit. The padding exercises the streaming verifier.
+	const pass = "large portable object test"
+	var packed bytes.Buffer
+	z := gzip.NewWriter(&packed)
+	h := sha256.New()
+	out := io.MultiWriter(z, h)
+	if _, err := io.WriteString(out, `{"version":2,"entries":["sample"]}`); err != nil {
+		t.Fatal(err)
+	}
+	block := bytes.Repeat([]byte(" "), 1<<20)
+	for range 129 {
+		if _, err := out.Write(block); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := z.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sealBatchObject(packed.Bytes(), pass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got batchManifest
+	s := batchStore{passphrase: pass}
+	if err := s.open(raw, hex.EncodeToString(h.Sum(nil)), &got); err != nil || got.Version != 2 || len(got.Entries) != 1 {
+		t.Fatalf("large gzip object: %+v, %v", got, err)
+	}
+}
+
+func TestSessionSyncStatusRetiresOldSizeErrors(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	c := Config{URL: "https://dav.example.invalid", User: "me", Password: "pw", Passphrase: "session status test", Sessions: true}
+	if err := Configure(c); err != nil {
+		t.Fatal(err)
+	}
+	config, ok := Load()
+	if !ok {
+		t.Fatal("missing WebDAV configuration")
+	}
+	writeError := func(message string) View {
+		saveState(state{Key: stateKey(config), Sessions: &sessionSyncState{Error: message, Backup: "previous-backup"}})
+		return Status()
+	}
+	for _, legacy := range []string{"session exceeds the 16 MiB portable transcript limit", "session exceeds the 64 MiB uncompressed transcript limit"} {
+		v := writeError("reading codex:example: " + legacy)
+		if v.SessionsError != "" || v.SessionsBackup != "previous-backup" {
+			t.Fatalf("legacy diagnostic or backup reference changed incorrectly: %q, %q", v.SessionsError, v.SessionsBackup)
+		}
+	}
+	const current = "writing session backup to WebDAV: HTTP 413"
+	if v := writeError(current); v.SessionsError != current {
+		t.Fatalf("current diagnostic: got %q, want %q", v.SessionsError, current)
 	}
 }

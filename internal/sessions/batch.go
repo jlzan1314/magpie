@@ -24,8 +24,6 @@ import (
 	"github.com/yetone/magpie/internal/steady"
 )
 
-const MaxBatchConversation = 64 << 20
-
 // BatchSource identifies a native conversation without accepting paths from a caller.
 type BatchSource struct {
 	Agent string `json:"agent"`
@@ -108,7 +106,6 @@ func readBatchConversation(ctx context.Context, ref BatchSource, s Session) (Bat
 	if !Reads(s.Agent) {
 		return c, ErrNotRead
 	}
-	var size int
 	var readErr error
 	err := readTranscript(s, func(_ bool, p Part) bool {
 		if readErr = ctx.Err(); readErr != nil {
@@ -117,11 +114,6 @@ func readBatchConversation(ctx context.Context, ref BatchSource, s Session) (Bat
 		p.Model = ""
 		if strings.TrimSpace(p.Text) == "" || p.Kind == "context" || p.Kind == "thinking" {
 			return true
-		}
-		size += len(p.Text) + len(p.Name) + 64
-		if size > MaxBatchConversation {
-			readErr = errors.New("session exceeds the 64 MiB uncompressed transcript limit")
-			return false
 		}
 		c.Parts = append(c.Parts, p)
 		return true
