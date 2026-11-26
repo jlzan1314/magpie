@@ -643,7 +643,7 @@ func Status() View {
 			v.UsageError = st.Usage.Error
 		}
 		if c.Sessions && st.Sessions != nil {
-			v.SessionsError = st.Sessions.Error
+			v.SessionsError = st.Sessions.currentError()
 			v.SessionsBackup = st.Sessions.Backup
 		}
 		if c.library() {

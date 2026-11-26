@@ -3,6 +3,7 @@ package davsync
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -12,6 +13,16 @@ type sessionSyncState struct {
 	Uploaded int       `json:"uploaded,omitempty"`
 	Skipped  int       `json:"skipped,omitempty"`
 	Error    string    `json:"error,omitempty"`
+}
+
+func (s sessionSyncState) currentError() string {
+	// These diagnostics were saved before session size was checked on the
+	// packed object. They do not describe a failure the current code can make.
+	if strings.HasSuffix(s.Error, ": session exceeds the 16 MiB portable transcript limit") ||
+		strings.HasSuffix(s.Error, ": session exceeds the 64 MiB uncompressed transcript limit") {
+		return ""
+	}
+	return s.Error
 }
 
 // SyncLocalSessions incrementally syncs all locally changed readable sessions

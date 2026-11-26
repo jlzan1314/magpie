@@ -267,12 +267,13 @@ context in the destination format. Native provider state and hidden
 reasoning are outside the portable records.
 
 [RunSessionBatch](../../internal/davsync/session_batches.go) writes a local
-backup first. Each merged conversation is gzipped, encrypted with the
-existing sync passphrase and saved as a separate object. A manifest gives
-the backup its ID. Each conversation can contain up to 64 MiB of
-uncompressed transcript, with a separate 64 MiB limit on the encrypted
-object after compression. Readers from before this limit change may need
-an update to open larger conversation objects. For a two-way WebDAV
+backup first. Each merged conversation is gzipped and encrypted with the
+existing sync passphrase. A manifest gives the backup its ID. There is no
+fixed size limit on a transcript. Large
+gzip streams span multiple encrypted objects, each under the 64 MiB
+transport limit. A version 3 manifest records their order and content
+hashes. This format requires an updated reader. The reader also accepts
+earlier manifests. For a two-way WebDAV
 computer, the conversation objects are published before the manifest.
 Magpie compares the sealed file length at
 its content-addressed destination using WebDAV metadata. A match skips the
