@@ -143,6 +143,9 @@ func SessionSyncActivity() SessionActivity {
 		}
 	}
 	// Explicit backup actions also publish this hint after manifest verification.
+	if v.Latest == currentSessionID {
+		return v
+	}
 	hint := batchHint(c)
 	if raw, err := os.ReadFile(hint); err == nil {
 		id := strings.TrimSpace(string(raw))

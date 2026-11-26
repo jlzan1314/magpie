@@ -92,23 +92,37 @@ func CollectOutgoingBatch(ctx context.Context, refs []BatchSource, all bool) ([]
 }
 
 func collectBatch(ctx context.Context, refs []BatchSource, all, partial, outgoing bool) ([]BatchConversation, []BatchFailure, error) {
+	var out []BatchConversation
+	failed, err := VisitBatch(ctx, refs, all, partial, outgoing, nil, func(c BatchConversation, _ string) error { out = append(out, c); return nil })
+	return out, failed, err
+}
+
+// VisitBatch opens one conversation at a time; a settled single-file
+// transcript can reuse a previously verified revision without reading its body.
+func VisitBatch(ctx context.Context, refs []BatchSource, all, partial, outgoing bool, skip func(BatchSource, string) bool, visit func(BatchConversation, string) error) ([]BatchFailure, error) {
 	if all && len(refs) != 0 {
-		return nil, nil, errors.New("choose all sessions or individual sessions")
+		return nil, errors.New("choose all sessions or individual sessions")
 	}
 	if !all && len(refs) == 0 {
-		return nil, nil, nil
+		return nil, nil
 	}
 	src := batchSources()
 	if all {
 		refs = slices.Collect(maps.Keys(src))
 	}
-	var out []BatchConversation
 	var failed []BatchFailure
 	for _, ref := range sortedSources(refs) {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		s, ok := src[ref]
+		mark := ""
+		if ok && skip != nil {
+			mark = batchSourceMark(s)
+			if skip(ref, mark) {
+				continue
+			}
+		}
 		var c BatchConversation
 		var err error
 		if !ok || !Reads(s.Agent) {
@@ -121,12 +135,12 @@ func collectBatch(ctx context.Context, refs []BatchSource, all, partial, outgoin
 		}
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil, nil, ctx.Err()
+				return nil, ctx.Err()
 			}
 			if !all || !errors.Is(err, errBatchEmpty) {
 				failure := fmt.Errorf("reading %s:%s: %w", ref.Agent, ref.ID, err)
 				if !partial {
-					return nil, nil, failure
+					return nil, failure
 				}
 				failed = append(failed, BatchFailure{ref, s.Title, failure.Error()})
 			}
@@ -135,9 +149,37 @@ func collectBatch(ctx context.Context, refs []BatchSource, all, partial, outgoin
 		if outgoing && unchangedImport(s, c) {
 			continue
 		}
-		out = append(out, c)
+		if err := visit(c, mark); err != nil {
+			return nil, err
+		}
 	}
-	return out, failed, nil
+	return failed, nil
+}
+
+func batchSourceMark(s Session) string {
+	// Database-backed and composite readers may change outside the main
+	// file. Always use their content fingerprint.
+	if s.Agent != "codex" && s.Agent != "claude" || s.BranchOf != "" {
+		return ""
+	}
+	mark := SettledFileMark(s.Path)
+	if mark == "" {
+		return ""
+	}
+	data, _ := json.Marshal([]any{s.Path, mark, s.Title, s.Cwd, s.Start})
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// SettledFileMark changes on a rewrite or replacement even when mtime is
+// restored. Unsupported or too-recent timestamps must be checked by content.
+func SettledFileMark(path string) string {
+	begin := time.Now()
+	info, err := codexDiscoveryStat(path)
+	if err != nil || !info.Mode().IsRegular() || !settledCodexStamp(info, begin) {
+		return ""
+	}
+	return fmt.Sprintf("%d/%d/%d", info.Size(), info.ModTime().UnixNano(), codexChangeTime(info).UnixNano())
 }
 
 func readBatchConversation(ctx context.Context, ref BatchSource, s Session) (BatchConversation, error) {
@@ -284,20 +326,24 @@ func ImportBatch(ctx context.Context, entries []BatchConversation, targets []str
 		return nil, err
 	}
 	targets = slices.Compact(slices.Sorted(slices.Values(targets)))
-	existing := knownBatchTargets(ctx, entries, targets, cwd)
+	projects := make([]string, len(entries))
+	for i, c := range entries {
+		project, err := batchProject(cwd, c.Cwd)
+		if err != nil {
+			return nil, err
+		}
+		projects[i] = project
+	}
+	existing := knownBatchTargets(ctx, entries, targets, projects)
 	items := make([][]BatchImport, len(targets))
 	var wg sync.WaitGroup
 	for i, target := range targets {
 		wg.Go(func() {
-			for _, c := range entries {
+			for j, c := range entries {
 				if ctx.Err() != nil {
 					return
 				}
-				project := cwd
-				if project == "" {
-					project = c.Cwd
-				}
-				items[i] = append(items[i], importBatchItem(c, target, project, existing))
+				items[i] = append(items[i], importBatchItem(c, target, projects[j], existing))
 			}
 		})
 	}
@@ -307,14 +353,10 @@ func ImportBatch(ctx context.Context, entries []BatchConversation, targets []str
 
 type batchDestination struct{ agent, cwd, fingerprint string }
 
-func knownBatchTargets(ctx context.Context, entries []BatchConversation, targets []string, cwd string) map[batchDestination]Session {
+func knownBatchTargets(ctx context.Context, entries []BatchConversation, targets, projects []string) map[batchDestination]Session {
 	wanted := map[string]map[string]bool{}
-	for _, c := range entries {
-		path := cwd
-		if path == "" {
-			path = c.Cwd
-		}
-		project := filepath.Clean(path)
+	for i, c := range entries {
+		project := filepath.Clean(projects[i])
 		if wanted[project] == nil {
 			wanted[project] = map[string]bool{}
 		}
@@ -344,16 +386,9 @@ func NewBatchReceiver(ctx context.Context, targets []string, cwd string) (*Batch
 }
 
 func (r *BatchReceiver) Receive(ctx context.Context, c BatchConversation) (int, error) {
-	project := r.cwd
-	if project == "" {
-		project = c.Cwd
-		if !batchDirectory(project) {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return 0, err
-			}
-			project = home
-		}
+	project, err := batchProject(r.cwd, c.Cwd)
+	if err != nil {
+		return 0, err
 	}
 	count := 0
 	var failures []error
@@ -411,6 +446,16 @@ func importBatchItem(c BatchConversation, target, cwd string, existing map[batch
 	}
 	r.Session, r.Command, r.Existing = s.ID, s.Command, seen
 	return r
+}
+
+func batchProject(override, original string) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	if batchDirectory(original) {
+		return original, nil
+	}
+	return os.UserHomeDir()
 }
 
 func batchDirectory(p string) bool {

@@ -344,7 +344,7 @@ func TestSessionBatchSkipAndLocalChangeSync(t *testing.T) {
 		t.Fatalf("first batch = %+v, %v", first, err)
 	}
 	davSrv.mu.Lock()
-	if davSrv.puts != 3 || davSrv.gets != 3 {
+	if davSrv.puts != 3 || davSrv.full != 3 {
 		t.Fatalf("first batch expected puts=3 gets=3, got puts=%d gets=%d", davSrv.puts, davSrv.gets)
 	}
 	davSrv.mu.Unlock()
@@ -354,7 +354,7 @@ func TestSessionBatchSkipAndLocalChangeSync(t *testing.T) {
 		t.Fatalf("repeat batch = %+v, %v", repeat, err)
 	}
 	davSrv.mu.Lock()
-	if davSrv.puts != 3 || davSrv.gets != 3 {
+	if davSrv.puts != 3 || davSrv.full != 3 {
 		t.Fatalf("repeat batch should skip without PUT/GET, got puts=%d gets=%d", davSrv.puts, davSrv.gets)
 	}
 	davSrv.mu.Unlock()
@@ -364,36 +364,40 @@ func TestSessionBatchSkipAndLocalChangeSync(t *testing.T) {
 	_ = os.Chtimes(codexNative, future, future)
 	sessions.Reset()
 	second, err := RunSessionBatch(ctx, SessionBatchRequest{All: true})
-	if err != nil || second.Backup == first.Backup || second.Conversations != 2 || second.Uploaded != 2 || second.Skipped != 1 {
+	if err != nil || second.Backup != first.Backup || second.Conversations != 2 || second.Uploaded != 2 || second.Skipped != 2 {
 		t.Fatalf("incremental batch = %+v, %v", second, err)
 	}
 	davSrv.mu.Lock()
-	if davSrv.puts != 5 || davSrv.gets != 6 {
-		t.Fatalf("incremental batch expected puts=5 gets=6, got puts=%d gets=%d", davSrv.puts, davSrv.gets)
+	if davSrv.puts != 5 || davSrv.full != 5 {
+		t.Fatalf("incremental batch expected puts=5 gets=5, got puts=%d gets=%d", davSrv.puts, davSrv.gets)
 	}
 	davSrv.mu.Unlock()
 
-	store := batchStore{passphrase: pass, batchID: second.Backup}
-	manifestData, err := readBatchFile(store.filename("backups", second.Backup))
+	cfg, _ := Load()
+	d, _ := newDAV(cfg)
+	store := currentStore(cfg, d)
+	current, _, err := store.readHead(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var current batchManifest
-	if err := store.open(manifestData, second.Backup, &current); err != nil {
-		t.Fatal(err)
+	var original currentPiece
+	for _, thread := range current.Threads {
+		original = thread.Pieces[0]
+		break
 	}
-	truncatedPath := "/dav/magpie/sessions/" + second.Backup + "/session_" + current.Entries[0] + ".sealed"
+	truncatedPath := store.remoteObjectPath("conversations", original.ID)
+	remoteFile := "/dav/" + folder + "/" + strings.Join(truncatedPath, "/")
 	davSrv.mu.Lock()
-	orig, exists := davSrv.files[truncatedPath]
+	orig, exists := davSrv.files[remoteFile]
 	if !exists || len(orig) <= 10 {
 		davSrv.mu.Unlock()
 		t.Fatalf("expected deduplicated object file at %s", truncatedPath)
 	}
-	davSrv.files[truncatedPath] = orig[:10]
+	davSrv.files[remoteFile] = orig[:10]
 	davSrv.mu.Unlock()
 
 	repaired, err := RunSessionBatch(ctx, SessionBatchRequest{All: true})
-	if err != nil || repaired.Uploaded != 1 || repaired.Skipped != 2 {
+	if err != nil || repaired.Uploaded != 1 || repaired.Skipped != 3 {
 		t.Fatalf("truncated repair = %+v, %v", repaired, err)
 	}
 
@@ -402,7 +406,7 @@ func TestSessionBatchSkipAndLocalChangeSync(t *testing.T) {
 	}
 	davSrv.mu.Lock()
 	for name := range davSrv.files {
-		if strings.Contains(name, "/"+second.Backup+"/") {
+		if strings.Contains(name, "/"+currentSessionDir+"/") {
 			t.Fatalf("deleted backup still has %s", name)
 		}
 	}
@@ -435,7 +439,7 @@ func TestSessionBatchSkipAndLocalChangeSync(t *testing.T) {
 		t.Fatalf("SyncNow with Sessions=true: %v", err)
 	}
 	v := Status()
-	if !v.Sessions || v.SessionsError != "" || v.SessionsBackup == "" || v.SessionsBackup == synced1.Backup {
+	if !v.Sessions || v.SessionsError != "" || v.SessionsBackup == "" || v.SessionsBackup != synced1.Backup {
 		t.Fatalf("unexpected Sessions status after SyncNow: %+v", v)
 	}
 }

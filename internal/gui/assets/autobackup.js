@@ -95,7 +95,7 @@ function autoBackupRows(v) {
     }));
     if (asking) rows.push(autoBackupPhraseForm("signIns"));
     const sessionPhrase = autoBackupPhrase === "sessions" && !v.sessions;
-    row(t("Sessions in local backups"), t("Save readable conversations in a separate encrypted file on this schedule and with Back up now."),
+    row(t("Sessions in local backups"), t("Save session changes on this schedule and with Back up now. Copy the entire backup folder to restore elsewhere."),
       segs([["off",t("Off")],["on",t("On")]], v.sessions || sessionPhrase ? "on" : "off", value => {
         if (value === "on" && !v.passphrase) { autoBackupPhrase = "sessions"; renderSync(); return; }
         autoBackupPhrase = false;
@@ -329,8 +329,12 @@ function restoreAutoSessions(b) {
   targets.append(...options.map(o => o.label));
   const folder = input("", t("Target project folder"));
   const phrase = input("", t("Passphrase"), "password");
+  const advanced=el("details","more advanced");
+  const project=el("div","stack");
+  project.append(...field(t("Target project folder"),folder));
+  advanced.append(el("summary","",t("Advanced")),project);
   ed.append(el("b","",t("Restore sessions…")), ...field(t("Import into agents"),targets),
-    ...field(t("Target project folder"),folder), ...field(t("Passphrase"),phrase,t("Leave empty to use the saved passphrase.")));
+    advanced, ...field(t("Passphrase"),phrase,t("Leave empty to use the saved passphrase.")));
   const cancel = el("button","text",t("Cancel"));
   const go = el("button","text primary",t("Import"));
   const say = syncBar(ed,"",el("span","grow"),cancel,go);

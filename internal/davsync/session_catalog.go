@@ -50,73 +50,107 @@ func RestoreChoices(ctx context.Context, offset int) (RestorePage, error) {
 		if err := ctx.Err(); err != nil {
 			return out, err
 		}
-		row := RestoreChoice{SessionBackup: entry}
-		store := batchStore{dav: d, passphrase: c.Passphrase, batchID: entry.ID}
-		var m batchManifest
-		if entry.WebDAV {
-			// Always inspect the remote manifest: a local copy can already
-			// exist while the last remote PUT is still pending.
-			raw, e := store.remote(ctx, "backups", entry.ID)
-			version := 2
-			if errors.Is(e, errSessionBackupMissing) {
-				store.batchID = ""
-				version = 1
-				raw, e = store.remote(ctx, "backups", entry.ID)
-			}
-			if e == nil {
-				e = store.open(raw, entry.ID, &m)
-			}
-			if e == nil && !m.valid(version) {
-				e = errors.New("invalid session backup manifest")
-			}
-			if e == nil {
-				e = store.checkManifestFiles(ctx, m, true)
-			}
-			if e == nil {
-				row.Ready = true
-				row.RemoteReady = true
-			} else if !errors.Is(e, errSessionBackupMissing) {
-				row.Problem = e.Error()
-			}
-		}
-		if !row.Ready && entry.Local {
-			store.batchID = entry.ID
-			raw, e := readBatchFile(store.filename("backups", entry.ID))
-			version := 2
-			if errors.Is(e, fs.ErrNotExist) {
-				store.batchID = ""
-				version = 1
-				raw, e = readBatchFile(store.filename("backups", entry.ID))
-			}
-			m = batchManifest{}
-			if e == nil {
-				e = store.open(raw, entry.ID, &m)
-			}
-			if e == nil && !m.valid(version) {
-				e = errors.New("invalid session backup manifest")
-			}
-			if e == nil {
-				e = store.checkManifestFiles(ctx, m, false)
-			}
-			if e == nil {
-				row.Ready = true
-			} else if e != nil {
-				row.Problem = e.Error()
-			}
-		}
-		if row.Ready {
-			row.Device = m.Device
-			for i, key := range m.Entries {
-				title := ""
-				if i < len(m.Info) {
-					title = m.Info[i].Title
-				}
-				row.Entries = append(row.Entries, restoreEntry{key, title})
-			}
-		}
+		row := inspectRestoreChoice(ctx, c, d, entry, true)
 		out.Items = append(out.Items, row)
 	}
 	return out, nil
+}
+
+// RestoreDetail authenticates one manifest. A preview contains up to two
+// titles; only a full inspection offers a backup for import.
+func RestoreDetail(ctx context.Context, entry SessionBackup, verify bool) (RestoreChoice, error) {
+	if !validBatchID(entry.ID) || (!entry.Local && !entry.WebDAV) {
+		return RestoreChoice{}, errors.New("invalid session backup selection")
+	}
+	if len(entry.Layouts) > 3 {
+		return RestoreChoice{}, errors.New("invalid session backup layout")
+	}
+	for _, layout := range entry.Layouts {
+		if layout != sessionDAVDir && layout != batchDir && layout != legacyBatchDir {
+			return RestoreChoice{}, errors.New("invalid session backup layout")
+		}
+	}
+	c, d, err := sessionBackupDAV()
+	if err != nil {
+		return RestoreChoice{}, err
+	}
+	row := inspectRestoreChoice(withSessionDAVTimeouts(ctx), c, d, entry, verify)
+	return row, ctx.Err()
+}
+
+func inspectRestoreChoice(ctx context.Context, c Config, d *dav, entry SessionBackup, verify bool) RestoreChoice {
+	row := RestoreChoice{SessionBackup: entry}
+	if entry.ID == currentSessionID {
+		return currentStore(c, d).currentChoice(ctx, row, verify)
+	}
+	store := batchStore{dav: d, passphrase: c.Passphrase, batchID: entry.ID}
+	inspect := func(raw []byte, err error, remote bool) bool {
+		if err != nil {
+			if !errors.Is(err, errSessionBackupMissing) && !errors.Is(err, fs.ErrNotExist) {
+				row.Problem = err.Error()
+			}
+			return false
+		}
+		var m batchManifest
+		version := 2
+		if store.batchID == "" {
+			version = 1
+		}
+		if err = store.open(raw, entry.ID, &m); err == nil && !m.valid(version) {
+			err = errors.New("invalid session backup manifest")
+		}
+		if err == nil && verify {
+			err = store.checkManifestFiles(ctx, m, remote)
+		}
+		if err != nil {
+			row.Problem = err.Error()
+			return false
+		}
+		row.Ready, row.RemoteReady, row.Device, row.Problem = verify, verify && remote, m.Device, ""
+		for i, id := range m.Entries {
+			title := ""
+			if i < len(m.Info) {
+				title = m.Info[i].Title
+			}
+			if !verify && title == "" {
+				continue
+			}
+			row.Entries = append(row.Entries, restoreEntry{id, title})
+			if !verify && len(row.Entries) == 2 {
+				break
+			}
+		}
+		return true
+	}
+	if entry.WebDAV {
+		layouts := entry.Layouts
+		if len(layouts) == 0 {
+			layouts = []string{sessionDAVDir, batchDir, legacyBatchDir}
+		}
+		for _, layout := range layouts {
+			if ctx.Err() != nil {
+				return row
+			}
+			store.remoteDir, store.batchID = layout, entry.ID
+			if layout == legacyBatchDir {
+				store.batchID = ""
+			}
+			raw, err := store.remoteAt(ctx, "backups", entry.ID)
+			if inspect(raw, err, true) {
+				return row
+			}
+		}
+	}
+	if entry.Local && ctx.Err() == nil {
+		store.batchID = entry.ID
+		raw, err := readBatchFile(store.filename("backups", entry.ID))
+		if errors.Is(err, fs.ErrNotExist) {
+			store.batchID = ""
+			raw, err = readBatchFile(store.filename("backups", entry.ID))
+		}
+		inspect(raw, err, false)
+	}
+	return row
 }
 
 func (s batchStore) checkManifestFiles(ctx context.Context, m batchManifest, remote bool) error {
@@ -130,7 +164,11 @@ func (s batchStore) checkManifestFiles(ctx context.Context, m batchManifest, rem
 		if dir == "" {
 			dir = sessionDAVDir
 		}
-		sizes, err = s.dav.listRemoteSizes(ctx, folder, dir, s.batchID)
+		collection := s.batchID
+		if s.current {
+			collection = currentSessionDir
+		}
+		sizes, err = s.dav.listRemoteSizes(ctx, folder, dir, collection)
 		if err != nil {
 			return err
 		}

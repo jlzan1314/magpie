@@ -173,3 +173,86 @@ func TestScheduledWebDAVImportsAndSkipsReturnedSessions(t *testing.T) {
 		t.Fatalf("edited import not exportable: %d %v", len(entries), err)
 	}
 }
+
+func TestLocalVersionsReuseSessionPieces(t *testing.T) {
+	root, folder, project := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	sessions.Reset()
+	config := backup.AutoConfig{Sessions: true, Passphrase: "local pool test", Keep: 7, Dir: folder}
+	if err := backup.SaveAuto(config); err != nil {
+		t.Fatal(err)
+	}
+	backupTestThread(t, testThreadA, "first text", project)
+	backupTestThread(t, testThreadB, "other entry", project)
+	first, err := backup.AutoNow("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := filepath.Join(folder, backup.SessionPool)
+	before, err := os.ReadDir(pool)
+	if err != nil || len(before) != 2 {
+		t.Fatal(len(before), err)
+	}
+	f, err := os.OpenFile(filepath.Join(os.Getenv("CODEX_HOME"), "sessions", "2026", "11", "25", "rollout-2026-11-25T10-00-00-"+testThreadA+".jsonl"), os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.WriteString("{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"additional reply\"}]}}\n")
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions.Reset()
+	second, err := backup.AutoNow("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadDir(pool)
+	if len(after) != 3 {
+		t.Fatalf("append must add one object, got %d", len(after))
+	}
+	if err = backup.AutoDelete(first.Name); err != nil {
+		t.Fatal(err)
+	}
+	after, _ = os.ReadDir(pool)
+	if len(after) != 3 {
+		t.Fatal("deleted shared pieces")
+	}
+	// Restore from the backup folder on another installation, without the writer's cache.
+	dest := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dest, "config"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(dest, "claude"))
+	t.Setenv("CODEX_HOME", filepath.Join(dest, "codex"))
+	sessions.Reset()
+	if err = backup.SaveAuto(config); err != nil {
+		t.Fatal(err)
+	}
+	copies, err := RestoreAutoSessions(context.Background(), second.Name, "", project, []string{"codex"})
+	if err != nil || len(copies) != 2 {
+		t.Fatal(copies, err)
+	}
+	var appended bool
+	for _, c := range copies {
+		entries, e := sessions.CollectBatch(context.Background(), []sessions.BatchSource{{Agent: "codex", ID: c.Session}}, false)
+		if e != nil || len(entries) != 1 {
+			t.Fatal(entries, e)
+		}
+		for _, p := range entries[0].Parts {
+			if p.Text == "additional reply" {
+				appended = true
+			}
+		}
+	}
+	if !appended {
+		t.Fatal("restore omitted appended turn")
+	}
+	if err = backup.AutoDelete(second.Name); err != nil {
+		t.Fatal(err)
+	}
+	after, _ = os.ReadDir(pool)
+	if len(after) != 0 {
+		t.Fatal("unreferenced pool objects survived", len(after))
+	}
+}

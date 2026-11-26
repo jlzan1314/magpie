@@ -480,6 +480,7 @@ func pruneAuto(dir, reason string, keep int, now time.Time) {
 	if err != nil {
 		return
 	}
+	removedSessions := false
 	good := 0
 	for _, e := range es {
 		if e.reason != reason {
@@ -487,13 +488,18 @@ func pruneAuto(dir, reason string, keep int, now time.Time) {
 		}
 		if good >= keep {
 			if os.Remove(filepath.Join(dir, e.name)) == nil && e.b.Sessions {
-				os.Remove(sessionArchivePath(dir, e.name))
+				if os.Remove(sessionArchivePath(dir, e.name)) == nil {
+					removedSessions = true
+				}
 			}
 			continue
 		}
 		if e.ok {
 			good++
 		}
+	}
+	if removedSessions {
+		pruneSessionPool(dir)
 	}
 	tmps, _ := filepath.Glob(filepath.Join(dir, autoTemp))
 	for _, p := range tmps {
@@ -537,6 +543,11 @@ func autoTick(ctx context.Context, now time.Time, app string) (*AutoBackup, erro
 	if c.Off {
 		return nil, nil
 	}
+	unlock, err := lockAutoPool(c)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	dir := c.dir()
 	// a pile from before the keep held for every file, or from a keep
 	// lowered since, goes at the first look, not at the next backup made
@@ -587,6 +598,11 @@ func AutoNow(app string) (AutoBackup, error) {
 	if err != nil {
 		return AutoBackup{}, err
 	}
+	unlock, err := lockAutoPool(c)
+	if err != nil {
+		return AutoBackup{}, err
+	}
+	defer unlock()
 	b, err := autoCollect(app)
 	if err != nil {
 		return AutoBackup{}, err
@@ -622,6 +638,11 @@ func AutoDelete(name string) error {
 	if err != nil {
 		return err
 	}
+	unlock, err := lockAutoPool(c)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	path := filepath.Join(c.dir(), name)
 	defer func() { autoMu.Lock(); delete(autoSeen, path); autoMu.Unlock() }()
 	info, err := os.Lstat(path)
@@ -651,6 +672,7 @@ func AutoDelete(name string) error {
 		if err := os.Remove(sessionArchivePath(c.dir(), name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
+		pruneSessionPool(c.dir())
 	}
 	return nil
 }
@@ -668,6 +690,11 @@ func AutoRestore(name, app string) (Result, AutoBackup, error) {
 	if err != nil {
 		return Result{}, AutoBackup{}, err
 	}
+	unlock, err := lockAutoPool(c)
+	if err != nil {
+		return Result{}, AutoBackup{}, err
+	}
+	defer unlock()
 	dir := c.dir()
 	_, f, err := readAuto(filepath.Join(dir, name))
 	if err != nil {

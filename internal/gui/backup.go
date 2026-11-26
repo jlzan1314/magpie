@@ -322,9 +322,32 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 			writeJSON(rw, job)
 			return
 		case "session-restore-choices":
-			var in struct{ Offset int }
+			var in struct {
+				Offset int
+				Scope  string
+				Backup *davsync.SessionBackup
+				Verify bool
+			}
 			if err := json.NewDecoder(http.MaxBytesReader(rw, r.Body, 4096)).Decode(&in); err != nil {
 				fail(rw, err)
+				return
+			}
+			if in.Backup != nil {
+				detail, err := davsync.RestoreDetail(ctx, *in.Backup, in.Verify)
+				if err != nil {
+					fail(rw, err)
+					return
+				}
+				writeJSON(rw, detail)
+				return
+			}
+			if in.Scope != "" {
+				index, err := davsync.RestoreIndex(ctx, in.Scope)
+				if err != nil {
+					fail(rw, err)
+					return
+				}
+				writeJSON(rw, index)
 				return
 			}
 			page, err := davsync.RestoreChoices(ctx, in.Offset)

@@ -801,6 +801,10 @@ window.sessionBatchForm = function (followsServer, tracker, sync) {
   back.rows = 2;
   back.spellcheck = false;
   const cwd = input("", "");
+  const advanced = el("details", "more advanced session-batch-advanced");
+  const projectField = el("div", "stack");
+  projectField.append(...field(t("Target project folder"), cwd));
+  advanced.append(el("summary", "", t("Advanced")), projectField);
   const destinations = el("div", "pair wrap session-batch-targets");
   destinations.setAttribute("role", "group");
   destinations.setAttribute("aria-label", t("Import into agents"));
@@ -840,8 +844,7 @@ window.sessionBatchForm = function (followsServer, tracker, sync) {
     ...backupField,
     ...field(t("Import into agents"), destinations),
     ...field(t("Automatic sync"), autoImport.label, schedule),
-    ...field(t("Target project folder"), cwd),
-    manager, actions, output);
+    advanced, manager, actions, output);
 
   let choices = [], targets = [], working = false, loaded = false;
   const ids = () => back.value.split(/[\s,]+/).filter(Boolean);
@@ -898,6 +901,7 @@ window.sessionBatchForm = function (followsServer, tracker, sync) {
     entry = prefs.entry || "";
     entryTitle = prefs.entryTitle || "";
     cwd.value = prefs.cwd || "";
+    advanced.open = !!cwd.value;
     autoImport.input.checked = !!prefs.autoImport;
     const selected = new Set((prefs.sources || []).map(sessionRefKey));
     choices = r.sources.map(({ agent, id, wsl, title, cwd }) => {
@@ -1074,87 +1078,188 @@ function sessionBackupManager(use) {
     }
   }
 
-  let offset = 0, generation = 0;
-  const shown = new Set();
   const more = el("button", "text", t("Show more"));
-  more.hidden = true;
-  box.lastElementChild.append(more);
-  more.onclick = () => load(true);
-  async function load(append = false) {
-    const turn = ++generation;
-    if (append !== true) {
-      offset = 0;
-      shown.clear();
-    }
-    more.disabled = true;
-    refresh.disabled = true;
-    if (!offset) list.replaceChildren(el("div", "", t("Working…")));
-    try {
-      const state = await api("davsync/session-restore-choices", { offset });
-      if (turn !== generation) return;
-      if (!offset) list.replaceChildren();
-      offset += state.items.length;
-      more.hidden = !state.more;
-      if (!state.items.length) list.append(el("div", "", t("No session backups")));
-      for (const item of state.items) {
-        if (shown.has(item.id)) continue;
-        shown.add(item.id);
-        const row = el("div", "session-batch-backup");
-        const titles = (item.entries || []).map(e => e.title).filter(Boolean);
-        row.append(el("span", "", [item.device, titles.slice(0, 2).join(" · ")].filter(Boolean).join(" · ") || item.id));
-        if (item.problem) showBatchFailure(row, item.problem);
-        if (item.ready && !item.remoteReady) row.append(el("span", "hint", t("Local backup")));
-        if (item.updated) row.append(el("span", "", new Date(item.updated).toLocaleString()));
-        const pick = el("button", "text", t("Use backup"));
-        pick.type = "button";
-        pick.onclick = () => use(item.id);
-        if (item.ready) row.append(pick);
-        if (item.ready && item.entries?.length) {
-          const choices = el("details", "more");
-          choices.append(el("summary", "", t("Choose a conversation")));
-          const stack = el("div", "stack");
-          const search = input("", t("Filter sessions"));
-          search.setAttribute("aria-label", t("Filter sessions"));
-          search.oninput = () => {
-            const needle = search.value.trim().toLocaleLowerCase();
-            for (const b of stack.children) b.hidden = !b.textContent.toLocaleLowerCase().includes(needle);
-          };
-          if (item.entries.length > 1) choices.append(search);
-          for (const choice of item.entries) {
-            const button = el("button", "text", choice.title || choice.id);
-            button.onclick = () => use(item.id, choice);
-            stack.append(button);
-          }
-          choices.append(stack);
-          row.append(choices);
-        }
-        if (!item.ready) row.append(el("span", "hint", t("Incomplete backup")));
-        if (item.local) {
-          const local = el("button", "text", t("Delete local backup"));
-          local.type = "button";
-          local.onclick = () => remove(item.id, "local");
-          row.append(local);
-        }
-        if (item.webdav && state.canDeleteWebDAV) {
-          const webdav = el("button", "text", t("Delete WebDAV backup"));
-          webdav.type = "button";
-          webdav.onclick = () => remove(item.id, "webdav");
-          row.append(webdav);
-        }
-        list.append(row);
-      }
-      if (state.webdavError) showBatchFailure(list, state.webdavError);
-    } catch (e) {
-      if (turn === generation) {
-        if (!offset) list.replaceChildren();
-        showBatchFailure(list, e.message);
-      }
-    } finally {
-      if (turn === generation) refresh.disabled = more.disabled = false;
-    }
+  more.type = "button";
+  const status = el("div", "sub wraps");
+  status.setAttribute("role", "status");
+  body.append(more, status);
+  let active;
+  const observer = new MutationObserver(() => { if (!box.isConnected) stop(); });
+  function stop() {
+    active?.abort();
+    active = null;
+    observer.disconnect();
   }
-
+  function queries(request, signal) {
+    return api("davsync/session-restore-choices", request, undefined, signal);
+  }
+  async function load() {
+    stop();
+    body.querySelector("[data-older-backups]")?.remove();
+    if (!box.open || !box.isConnected) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    active = controller;
+    observer.observe(document.body, {childList:true, subtree:true});
+    const known = new Map();
+    const rows = new Map();
+    let includeOlder = false;
+    let limit = 10, previewing = 0, pending = 2, canDelete = false, webPending = true;
+    const messages = [];
+    list.replaceChildren();
+    more.hidden = true;
+    status.textContent = t("Loading WebDAV backups…");
+    refresh.disabled = false;
+    const older=el("button","text",t("Older backups"));
+    older.type="button"; older.dataset.olderBackups="";
+    older.onclick=()=>{includeOlder=!includeOlder;show();};
+    function show() {
+      const sorted = [...known.values()].sort((a,b) => Number(!!b.current)-Number(!!a.current) || (Date.parse(b.updated)||0)-(Date.parse(a.updated)||0) || a.id.localeCompare(b.id));
+      const hasCurrent=sorted.some(x=>x.current);
+      const available=hasCurrent && !includeOlder ? sorted.filter(x=>x.current) : sorted;
+      const visible=available.slice(0,limit);
+      older.hidden=!hasCurrent || available.length===1 && sorted.length===1;
+      older.setAttribute("aria-expanded",String(includeOlder));
+      const nodes = visible.map(item => {
+        let r = rows.get(item.id);
+        if (!r) {
+          r = backupRow(item);
+          rows.set(item.id,r);
+        }
+        r.update();
+        return r.node;
+      });
+      // Keep an open row's elements and focus when the other index arrives.
+      for (let i=0;i<nodes.length;i++) {
+        if (list.children[i] !== nodes[i]) list.insertBefore(nodes[i],list.children[i] || null);
+      }
+      while (list.children.length > nodes.length) list.lastChild.remove();
+      more.hidden = available.length <= limit;
+      if (!older.isConnected) status.after(older);
+      status.textContent = [...messages, ...(pending ? [t(webPending ? "Loading WebDAV backups…" : "Loading…")] : !sorted.length && !messages.length ? [t("No session backups")] : [])].join(" · ");
+      for (const item of visible) {
+        if (previewing >= 2) break;
+        const row = rows.get(item.id);
+        if (row.started) continue;
+        row.started = true;
+        if (item.current) continue;
+        previewing++;
+        row.preview().finally(() => {
+          previewing--;
+          if (!signal.aborted) show();
+        });
+      }
+    }
+    function backupRow(item) {
+      const node = el("div","stack");
+      const row = el("div","session-batch-backup");
+      const title = el("span","");
+      const date = el("span","sub");
+      const inspect = el("button","text",t("View backup"));
+      const actions = el("div","stack");
+      const local = el("button","text",t("Delete local backup"));
+      const remote = el("button","text",t("Delete WebDAV backup"));
+      for (const button of [inspect, local, remote]) button.type="button";
+      local.onclick=()=>remove(item.id,"local");
+      remote.onclick=()=>remove(item.id,"webdav");
+      row.append(title,date,inspect,local,remote);
+      node.append(row,actions);
+      let detail, summary, busy=false;
+      const label = () => {
+        const data = detail || summary;
+        const names = (data?.entries || []).map(e=>e.title).filter(Boolean).slice(0,2);
+        title.textContent = item.current ? t("Current session backup") : [data?.device, ...names].filter(Boolean).join(" · ") || item.id.slice(0,12);
+        title.title = item.id;
+      };
+      inspect.onclick = async () => {
+        if (busy) return;
+        if (detail?.ready) {actions.hidden = !actions.hidden;return;}
+        busy=true;
+        inspect.disabled=true;
+        actions.hidden=false;
+        actions.textContent=t("Checking…");
+        try {
+          const request = source => queries({backup:{...item,local:source==="local",webdav:source==="webdav"},verify:true},signal);
+          const remoteFirst=item.webdav && (item.current || !item.local);
+          detail=await request(remoteFirst ? "webdav" : "local");
+          if (!detail.ready && item.local && item.webdav) detail=await request(remoteFirst ? "local" : "webdav");
+          if (signal.aborted) return;
+          label();
+          actions.replaceChildren();
+          if (!detail.ready) {showBatchFailure(actions,detail.problem || t("Incomplete backup"));return;}
+          const pick=el("button","text",t("Use backup"));
+          pick.type="button";
+          pick.onclick=()=>use(item.id);
+          actions.append(pick);
+          if (detail.entries?.length) actions.append(sessionConversationChoices(detail.entries, choice=>use(item.id,choice)));
+        } catch(e) {if (!signal.aborted) {actions.replaceChildren();showBatchFailure(actions,e.message);}}
+        finally {busy=false;inspect.disabled=false;}
+      };
+      return {node, started:false, update() {
+        date.textContent=item.updated ? new Date(item.updated).toLocaleString() : "";
+        local.hidden=!item.local;
+        remote.hidden=!item.webdav || !canDelete;
+        label();
+      }, async preview() {
+        // A preview reads only the authenticated manifest. Prefer disk when
+        // available; remote object existence is checked on explicit inspection.
+        try {
+          const data=await queries({backup:{...item,webdav:!item.local && item.webdav},verify:false},signal);
+          if (!signal.aborted){summary=data;label();}
+        } catch { /* The row stays usable; inspection shows the current error. */ }
+      }};
+    }
+    more.onclick=()=>{limit+=10;show();};
+    await Promise.all(["local","webdav"].map(async scope=>{
+      try {
+        const index=await queries({scope},signal);
+        if (signal.aborted) return;
+        if (scope === "webdav") canDelete=index.canDeleteWebDAV;
+        for (const next of index.items || []) {
+          const item=known.get(next.id) || {id:next.id};
+          item.current ||= next.current;
+          item.local ||= next.local;
+          item.webdav ||= next.webdav;
+          if (next.layouts) item.layouts=next.layouts;
+          if (next.updated && (!item.updated || Date.parse(next.updated)>Date.parse(item.updated))) item.updated=next.updated;
+          known.set(next.id,item);
+        }
+        if (index.webdavError) messages.push(tNotice(index.webdavError));
+      } catch(e) {if (!signal.aborted) messages.push(e.message);}
+      finally {pending--;if (scope==="webdav") webPending=false;if (!signal.aborted) show();}
+    }));
+  }
   refresh.onclick = load;
-  box.ontoggle = () => { if (box.open) load(); };
+  box.ontoggle = () => box.open ? load() : stop();
   return box;
+}
+
+// The transcript list can contain thousands of conversations. Only create
+// controls after it is opened, and render search results a page at a time.
+function sessionConversationChoices(entries, use) {
+  const choices=el("details","more");
+  choices.append(el("summary","",t("Choose a conversation")));
+  const stack=el("div","stack");
+  const search=input("",t("Filter sessions"));
+  search.setAttribute("aria-label",t("Filter sessions"));
+  const more=el("button","text",t("Show more"));
+  more.type="button";
+  let limit=50;
+  const draw=()=>{
+    const query=search.value.trim().toLocaleLowerCase();
+    const matches=entries.filter(e=>(e.title || e.id).toLocaleLowerCase().includes(query));
+    stack.replaceChildren();
+    for (const choice of matches.slice(0,limit)) {
+      const button=el("button","text",choice.title || choice.id);
+      button.type="button";button.onclick=()=>use(choice);
+      stack.append(button);
+    }
+    more.hidden=matches.length<=limit;
+  };
+  if (entries.length>1) choices.append(search);
+  choices.append(stack,more);
+  choices.ontoggle=()=>{if(choices.open) draw();};
+  search.oninput=()=>{limit=50;draw();};
+  more.onclick=()=>{limit+=50;draw();};
+  return choices;
 }

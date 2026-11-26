@@ -137,7 +137,7 @@ func TestSessionPartialBackupRestoresOnOtherDevice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := json.Marshal(items[0])
+	raw, err := json.Marshal(sessions.BatchConversation{Parts: items[0].Parts})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,8 +176,14 @@ func TestSessionPartialBackupRestoresOnOtherDevice(t *testing.T) {
 		if !strings.Contains(entries[0].Parts[0].Text, "good session") {
 			t.Fatalf("wrong restored content: %+v", entries[0].Parts)
 		}
-		cache := batchStore{batchID: item.ID}
-		if err := os.WriteFile(cache.filename("conversations", target.ID), []byte("damaged fixture"), 0600); err != nil {
+		d, _ := newDAV(cfg)
+		cache := currentStore(cfg, d)
+		head, err := cache.readLibrary(context.Background(), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		piece := head.Threads[target.ID].Pieces[0]
+		if err := os.WriteFile(cache.filename("conversations", piece.ID), []byte("damaged fixture"), 0600); err != nil {
 			t.Fatal(err)
 		}
 		again, err := RunSessionBatch(context.Background(), SessionBatchRequest{Backups: []string{item.ID}, Entry: target.ID, Targets: []string{"codex"}, Cwd: project})
@@ -288,7 +294,7 @@ func TestSessionBackupSurvivesProcessExit(t *testing.T) {
 		t.Fatalf("second process: %v: %s", err, out)
 	}
 	st = loadState()
-	if st.Sessions.Backup != id || st.Sessions.Skipped != 1 || st.Sessions.Uploaded != 2 {
+	if st.Sessions.Backup != currentSessionID || !validBatchID(id) || st.Sessions.Skipped != 1 || st.Sessions.Uploaded != 2 {
 		t.Fatalf("resumed a different snapshot or retransmitted a verified file: %+v", st.Sessions)
 	}
 }
