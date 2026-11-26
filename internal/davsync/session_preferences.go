@@ -15,6 +15,8 @@ import (
 // SessionPreferences holds this device's draft for the session batch form.
 // A draft may be saved before the user has chosen to run any transfer.
 type SessionPreferences struct {
+	Entry       string                 `json:"entry,omitempty"`
+	EntryTitle  string                 `json:"entryTitle,omitempty"`
 	All         bool                   `json:"all"`
 	Sources     []sessions.BatchSource `json:"sources,omitempty"`
 	SourceAgent string                 `json:"sourceAgent,omitempty"`

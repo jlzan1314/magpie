@@ -6,15 +6,21 @@ import (
 	"io/fs"
 	"strings"
 	"time"
+
+	"github.com/yetone/magpie/internal/sessions"
 )
 
 type sessionSyncState struct {
-	At       time.Time `json:"at,omitzero"`
-	Backup   string    `json:"backup,omitempty"`
-	Uploaded int       `json:"uploaded,omitempty"`
-	Skipped  int       `json:"skipped,omitempty"`
-	Error    string    `json:"error,omitempty"`
-	Pending  string    `json:"pending,omitempty"`
+	Conversations int                     `json:"conversations,omitempty"`
+	Request       SessionRetry            `json:"request,omitzero"`
+	Failed        []sessions.BatchFailure `json:"failed,omitempty"`
+	Explicit      bool                    `json:"explicit,omitempty"`
+	At            time.Time               `json:"at,omitzero"`
+	Backup        string                  `json:"backup,omitempty"`
+	Uploaded      int                     `json:"uploaded,omitempty"`
+	Skipped       int                     `json:"skipped,omitempty"`
+	Error         string                  `json:"error,omitempty"`
+	Pending       string                  `json:"pending,omitempty"`
 }
 
 const sessionUploadInterrupted = "Session backup upload was interrupted. The next sync will resume it."
@@ -59,9 +65,40 @@ func (s sessionSyncState) currentError() string {
 	return s.Error
 }
 
+func sessionUploadConfig() (Config, error) {
+	c, ok := Load()
+	if !ok || c.S3() || c.GitHub() {
+		return c, errors.New("set up WebDAV sync before backing up sessions")
+	}
+	if c.FollowServer {
+		return c, errors.New("this computer follows the server and cannot upload local session changes")
+	}
+	return c, nil
+}
+
 // SyncLocalSessions incrementally syncs all locally changed readable sessions
 // to WebDAV, skipping packed objects and manifests whose sizes match remote.
 func SyncLocalSessions(ctx context.Context) (SessionBatchResult, error) {
+	c, err := sessionUploadConfig()
+	if err != nil {
+		return SessionBatchResult{}, err
+	}
+	job, owner := beginSessionJob(c)
+	if !owner {
+		select {
+		case <-ctx.Done():
+			return SessionBatchResult{}, ctx.Err()
+		case <-job.done:
+			return job.result, job.err
+		}
+	}
+	result, err := syncLocalSessionJob(ctx, c, job, SessionRetry{})
+	job.finish(result, err)
+	return result, err
+}
+
+func syncLocalSessionJob(ctx context.Context, requested Config, job *sessionJob, retry SessionRetry) (SessionBatchResult, error) {
+	ctx = context.WithValue(ctx, sessionJobKey{}, job)
 	lctx, lcancel := context.WithTimeout(ctx, wait)
 	unlock, err := lock(lctx)
 	lcancel()
@@ -72,31 +109,37 @@ func SyncLocalSessions(ctx context.Context) (SessionBatchResult, error) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	c, ok := Load()
-	if !ok || c.S3() || c.GitHub() {
-		return SessionBatchResult{}, errors.New("set up WebDAV sync before backing up sessions")
+	c, err := sessionUploadConfig()
+	if err != nil {
+		return SessionBatchResult{}, err
 	}
-	if c.FollowServer {
-		return SessionBatchResult{}, errors.New("this computer follows the server and cannot upload local session changes")
+	if stateKey(c) != stateKey(requested) {
+		return SessionBatchResult{}, errors.New("WebDAV settings changed before the upload started")
 	}
 	st := loadState()
 	if st.Key != stateKey(c) {
 		st = state{Key: stateKey(c), Brought: st.Brought, Replaced: st.Replaced, Own: st.Own, Follow: st.Follow, Here: st.Here}
 	}
-	res, err := recordSessionSync(ctx, c, &st, true)
-	saveState(st)
+	res, err := recordSessionSync(ctx, c, &st, true, retry)
+	if writeErr := saveState(st); writeErr != nil {
+		return res, errors.Join(err, writeErr)
+	}
 	return res, err
 }
 
 func shareSessions(ctx context.Context, c Config, st *state) {
 	if !c.Sessions || c.FollowServer || c.S3() || c.GitHub() {
-		st.Sessions = nil
 		return
 	}
-	_, _ = recordSessionSync(ctx, c, st, false)
+	job, owner := beginSessionJob(c)
+	if !owner {
+		return
+	}
+	result, err := recordSessionSync(context.WithValue(ctx, sessionJobKey{}, job), c, st, false, SessionRetry{})
+	job.finish(result, err)
 }
 
-func recordSessionSync(ctx context.Context, c Config, st *state, explicit bool) (SessionBatchResult, error) {
+func recordSessionSync(ctx context.Context, c Config, st *state, explicit bool, retry SessionRetry) (SessionBatchResult, error) {
 	if st.Sessions == nil {
 		st.Sessions = &sessionSyncState{}
 	}
@@ -107,27 +150,76 @@ func recordSessionSync(ctx context.Context, c Config, st *state, explicit bool) 
 	status.Pending = pending
 	if status.Pending != "" {
 		result, err = resumeSessionBatch(ctx, c, status.Pending, remoteDir)
+		result.Failed = append(result.Failed, status.Failed...)
 		if errors.Is(err, fs.ErrNotExist) {
 			status.Pending = ""
 		}
 	}
 	if status.Pending == "" {
-		result, err = runSessionBatch(ctx, c, SessionBatchRequest{All: true}, func(id string) {
+		failedOnly := retry.FailedOnly || retry.Source != nil
+		if status.Explicit && !failedOnly {
+			retry = status.Request
+			failedOnly = retry.FailedOnly || retry.Source != nil
+		}
+		req := SessionBatchRequest{All: !failedOnly}
+		var outstanding []sessions.BatchFailure
+		if failedOnly {
+			for _, failure := range status.Failed {
+				if retry.Source != nil && *retry.Source != failure.Source {
+					outstanding = append(outstanding, failure)
+					continue
+				}
+				req.Sources = append(req.Sources, failure.Source)
+			}
+			if status.Backup != "" {
+				req.Backups = []string{status.Backup}
+			}
+			if len(req.Sources) == 0 {
+				return result, errors.New("no failed sessions to retry")
+			}
+		}
+		if explicit {
+			status.Explicit = true
+			status.Request = retry
+			if err := saveState(*st); err != nil {
+				return result, err
+			}
+		}
+		result, err = runSessionBatch(ctx, c, req, func(id string, failed []sessions.BatchFailure) error {
+			status.Failed = append(append([]sessions.BatchFailure(nil), outstanding...), failed...)
+			status.Explicit = explicit
 			status.Pending = id
-			saveState(*st)
+			return saveState(*st)
 		})
+		result.Failed = append(result.Failed, outstanding...)
 	}
 	if errors.Is(err, errEmptySessionBatch) && !explicit {
 		err = nil
 	}
 	if err != nil {
+		if errors.Is(err, errAllSessionsRejected) {
+			status.Pending = ""
+			status.Explicit = false
+		}
+		if len(result.Failed) > 0 {
+			status.Failed = result.Failed
+		}
+		if _, _, transient := sessionRetryDelay(err, 0); !transient && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			status.Explicit = false
+		}
 		status.Error = err.Error()
 		return result, err
 	}
 	status.Error = ""
 	status.Pending = ""
-	status.At = time.Now()
-	status.Backup = result.Backup
+	status.Explicit = false
+	status.Request = SessionRetry{}
+	status.Failed = result.Failed
+	if result.Remote && result.Backup != "" {
+		status.Conversations = result.Conversations
+		status.At = time.Now()
+		status.Backup = result.Backup
+	}
 	status.Uploaded, status.Skipped = result.Uploaded, result.Skipped
 	return result, nil
 }

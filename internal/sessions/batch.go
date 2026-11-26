@@ -68,37 +68,68 @@ func BatchCandidates() []BatchCandidate {
 	return out
 }
 
+type BatchFailure struct {
+	Source BatchSource `json:"source"`
+	Title  string      `json:"title,omitempty"`
+	Error  string      `json:"error"`
+}
+
+// CollectBatch preserves the strict behavior for callers that require all sources.
 func CollectBatch(ctx context.Context, refs []BatchSource, all bool) ([]BatchConversation, error) {
+	entries, _, err := collectBatch(ctx, refs, all, false)
+	return entries, err
+}
+
+// CollectAvailableBatch returns readable transcripts and identifies individual
+// failures so unrelated conversations can still reach a verified snapshot.
+func CollectAvailableBatch(ctx context.Context, refs []BatchSource, all bool) ([]BatchConversation, []BatchFailure, error) {
+	return collectBatch(ctx, refs, all, true)
+}
+
+func collectBatch(ctx context.Context, refs []BatchSource, all, partial bool) ([]BatchConversation, []BatchFailure, error) {
 	if all && len(refs) != 0 {
-		return nil, errors.New("choose all sessions or individual sessions")
+		return nil, nil, errors.New("choose all sessions or individual sessions")
 	}
 	if !all && len(refs) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	src := batchSources()
 	if all {
 		refs = slices.Collect(maps.Keys(src))
 	}
-	out := make([]BatchConversation, 0, len(refs))
+	var out []BatchConversation
+	var failed []BatchFailure
 	for _, ref := range sortedSources(refs) {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		s, ok := src[ref]
+		var c BatchConversation
+		var err error
 		if !ok || !Reads(s.Agent) {
-			return nil, fmt.Errorf("session %s:%s is no longer available", ref.Agent, ref.ID)
-		}
-		c, err := readBatchConversation(ctx, ref, s)
-		if err != nil {
-			return nil, fmt.Errorf("reading %s:%s: %w", ref.Agent, ref.ID, err)
-		}
-
-		if err := c.validate(); err != nil {
-			if all && errors.Is(err, errBatchEmpty) {
-				continue
+			err = errors.New("session is no longer available")
+		} else {
+			c, err = readBatchConversation(ctx, ref, s)
+			if err == nil {
+				err = c.validate()
 			}
-			return nil, fmt.Errorf("reading %s:%s: %w", ref.Agent, ref.ID, err)
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			if !all || !errors.Is(err, errBatchEmpty) {
+				failure := fmt.Errorf("reading %s:%s: %w", ref.Agent, ref.ID, err)
+				if !partial {
+					return nil, nil, failure
+				}
+				failed = append(failed, BatchFailure{ref, s.Title, failure.Error()})
+			}
+			continue
 		}
 		out = append(out, c)
 	}
-	return out, nil
+	return out, failed, nil
 }
 
 func readBatchConversation(ctx context.Context, ref BatchSource, s Session) (BatchConversation, error) {

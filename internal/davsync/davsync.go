@@ -696,12 +696,15 @@ func loadState() state {
 // state, which starts sync afresh and loses a restore's Undo and the Blind
 // guard: such a file is kept aside first, and one that can't be isn't
 // written over.
-func saveState(st state) {
-	if lastgood.KeepUnparsed(path("sync-state.json"), lastgood.Into[state]) != nil {
-		return
+func saveState(st state) error {
+	if err := lastgood.KeepUnparsed(path("sync-state.json"), lastgood.Into[state]); err != nil {
+		return err
 	}
-	b, _ := json.MarshalIndent(st, "", "  ")
-	edit.WriteAtomic(path("sync-state.json"), b)
+	b, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	return edit.WriteAtomic(path("sync-state.json"), b)
 }
 
 // stateKey is the setup the state is for: an S3 endpoint too, when there is one
@@ -902,8 +905,22 @@ func run(ctx context.Context, first time.Duration) {
 		t.Reset(poll)
 		cfg, ok := Load()
 		every := cfg.auto()
-		if !ok || every == 0 {
+		if !ok {
 			continue
+		}
+		if every == 0 || !cfg.Sessions {
+			st := loadState()
+			if !cfg.FollowServer && st.Key == stateKey(cfg) && st.Sessions != nil && st.Sessions.Explicit && (tried.IsZero() || time.Since(tried) >= max(every, poll)) {
+				c, cancel := context.WithTimeout(ctx, sessionSyncBudget)
+				_, _ = SyncLocalSessions(c)
+				cancel()
+				if every == 0 {
+					tried = time.Now()
+				}
+			}
+			if every == 0 {
+				continue
+			}
 		}
 		// a server limiting requests is waited for as backoff says; else the
 		// time set now, which may have changed since the last sync

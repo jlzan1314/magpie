@@ -72,10 +72,15 @@ func (d *dav) propfindSize(ctx context.Context, u string) (size int64, exists bo
 	return -1, len(ms.Responses) > 0, nil
 }
 
+type remoteSessionFile struct {
+	size int64
+	etag string
+}
+
 // listRemoteSizes lists direct child files in a WebDAV collection and returns
 // their getcontentlength (-1 when omitted). It returns nil, nil when the server
 // does not support PROPFIND so callers can fall back to per-file probes.
-func (d *dav) listRemoteSizes(ctx context.Context, dirs ...string) (map[string]int64, error) {
+func (d *dav) listRemoteSizes(ctx context.Context, dirs ...string) (map[string]remoteSessionFile, error) {
 	address := d.url(dirs...) + "/"
 	res, err := d.send(ctx, "PROPFIND", address, nil, map[string]string{"Depth": "1"})
 	if err != nil {
@@ -84,7 +89,7 @@ func (d *dav) listRemoteSizes(ctx context.Context, dirs ...string) (map[string]i
 	defer res.Body.Close()
 	switch res.StatusCode {
 	case http.StatusNotFound, http.StatusGone, http.StatusConflict:
-		return map[string]int64{}, nil
+		return map[string]remoteSessionFile{}, nil
 	case http.StatusForbidden, http.StatusMethodNotAllowed, http.StatusNotImplemented:
 		return nil, nil
 	case http.StatusMultiStatus:
@@ -95,6 +100,7 @@ func (d *dav) listRemoteSizes(ctx context.Context, dirs ...string) (map[string]i
 		Entries []struct {
 			Href       string    `xml:"href"`
 			Length     string    `xml:"propstat>prop>getcontentlength"`
+			Tag        string    `xml:"propstat>prop>getetag"`
 			Collection *struct{} `xml:"propstat>prop>resourcetype>collection"`
 		} `xml:"response"`
 	}
@@ -103,7 +109,7 @@ func (d *dav) listRemoteSizes(ctx context.Context, dirs ...string) (map[string]i
 	}
 	base, _ := url.Parse(address)
 	basePath := pathpkg.Clean(base.Path)
-	out := map[string]int64{}
+	out := map[string]remoteSessionFile{}
 	for _, e := range ms.Entries {
 		if e.Collection != nil {
 			continue
@@ -120,19 +126,19 @@ func (d *dav) listRemoteSizes(ctx context.Context, dirs ...string) (map[string]i
 		if n, err := strconv.ParseInt(strings.TrimSpace(e.Length), 10, 64); err == nil && n >= 0 {
 			size = n
 		}
-		out[pathpkg.Base(p)] = size
+		out[pathpkg.Base(p)] = remoteSessionFile{size, strings.TrimSpace(e.Tag)}
 	}
 	return out, nil
 }
 
-func (d *dav) remoteSizeMatches(ctx context.Context, u string, want int64, dirSizes map[string]int64, name string) (same, exists bool, err error) {
+func (d *dav) remoteSizeMatches(ctx context.Context, u string, want int64, dirSizes map[string]remoteSessionFile, name string) (same, exists bool, err error) {
 	if dirSizes != nil {
 		sz, ok := dirSizes[name]
 		if !ok {
 			return false, false, nil
 		}
-		if sz >= 0 {
-			return sz == want, true, nil
+		if sz.size >= 0 {
+			return sz.size == want, true, nil
 		}
 	}
 	sz, ex, err := d.remoteSize(ctx, u)

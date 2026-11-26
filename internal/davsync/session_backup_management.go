@@ -37,6 +37,10 @@ func ListSessionBackups(ctx context.Context) (SessionBackups, error) {
 	if err != nil {
 		return SessionBackups{}, err
 	}
+	return listSessionBackups(ctx, c, d)
+}
+
+func listSessionBackups(ctx context.Context, c Config, d *dav) (SessionBackups, error) {
 	out := SessionBackups{Items: []SessionBackup{}, CanDeleteWebDAV: !c.FollowServer}
 	items := map[string]SessionBackup{}
 	for _, v := range []string{batchDir, legacyBatchDir} {
@@ -183,7 +187,24 @@ func DeleteSessionBackup(ctx context.Context, id, scope string) error {
 			}
 		}
 		_, err := deleteDAVBackup(ctx, d, d.url(folder, legacyBatchDir, "backups", id+".sealed"))
-		return err
+		if err != nil {
+			return err
+		}
+		return locked(func() error {
+			hint := batchHint(c)
+			if raw, err := os.ReadFile(hint); err == nil && string(raw) == id {
+				if err := writeBatchFile(hint, nil); err != nil {
+					return err
+				}
+			}
+			st := loadState()
+			if st.Key == stateKey(c) && st.Sessions != nil && st.Sessions.Backup == id {
+				st.Sessions.Backup = ""
+				st.Sessions.At = time.Time{}
+				return saveState(st)
+			}
+			return nil
+		})
 	default:
 		return errors.New("choose local or WebDAV session backup")
 	}

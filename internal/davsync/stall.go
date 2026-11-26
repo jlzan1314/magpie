@@ -103,7 +103,12 @@ func (t stallTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	done := func() { w.timer.Stop(); cancel(nil) }
 	r := req.Clone(ctx)
 	if req.Body != nil && req.Body != http.NoBody {
-		r.Body = &watched{ReadCloser: req.Body, w: w, ctx: ctx}
+		body := &watched{ReadCloser: req.Body, w: w, ctx: ctx}
+		if job, ok := ctx.Value(sessionJobKey{}).(*sessionJob); ok && req.Method == http.MethodPut {
+			var sent int64
+			body.progress = func(n int) { sent += int64(n); job.mu.Lock(); job.view.Sending = sent; job.mu.Unlock() }
+		}
+		r.Body = body
 	}
 	res, err := t.base.RoundTrip(r)
 	if err != nil {
@@ -158,6 +163,7 @@ func (w *watch) moved() {
 
 // watched is a body whose reads tell the watchdog.
 type watched struct {
+	progress func(int)
 	io.ReadCloser
 	w    *watch
 	ctx  context.Context
@@ -169,6 +175,9 @@ func (b *watched) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
 	if n > 0 {
 		b.w.moved()
+		if b.progress != nil {
+			b.progress(n)
+		}
 	}
 	if b.done == nil && err == io.EOF { // the request's body
 		b.w.allSent()

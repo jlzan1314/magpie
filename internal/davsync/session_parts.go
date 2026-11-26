@@ -14,7 +14,7 @@ import (
 
 // The envelope base64-encodes the gzip bytes. Leave room for that expansion
 // under the per-object transport limit.
-const batchPartSize = 32 << 20
+const batchPartSize = 8 << 20
 
 type batchObject struct {
 	kind string
@@ -93,7 +93,9 @@ func prepareBatchParts(ctx context.Context, dir, pass string, size int, plain []
 func (s batchStore) keepPrepared(dir, part string, object batchObject) error {
 	target := s.filename(object.kind, object.id)
 	if raw, err := readBatchFile(target); err == nil {
-		return s.verifyObject(raw, object.kind, object.id)
+		if err := s.verifyObject(raw, object.kind, object.id); err == nil || errors.Is(err, backup.ErrPassphrase) {
+			return err
+		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
@@ -143,18 +145,11 @@ func (r *batchPartReader) Read(p []byte) (int, error) {
 			return 0, io.EOF
 		}
 		id := r.ids[0]
-		raw, fetched, err := r.store.loadRaw(r.ctx, "parts", id)
+		data, err := readVerifiedBatchFile(r.ctx, &r.store, "parts", id, func(raw []byte) ([]byte, error) {
+			return r.store.openPart(raw, id)
+		})
 		if err != nil {
 			return 0, err
-		}
-		data, err := r.store.openPart(raw, id)
-		if err != nil {
-			return 0, err
-		}
-		if fetched {
-			if err := writeBatchFile(r.store.filename("parts", id), raw); err != nil {
-				return 0, err
-			}
 		}
 		r.data, r.ids = data, r.ids[1:]
 	}

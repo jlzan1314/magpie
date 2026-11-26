@@ -213,6 +213,10 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 	})
 
 	mux.HandleFunc("GET /api/davsync", func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("view") == "session-activity" {
+			writeJSON(rw, davsync.SessionSyncActivity())
+			return
+		}
 		writeJSON(rw, davsync.Status())
 	})
 	mux.HandleFunc("POST /api/davsync/{action}", func(rw http.ResponseWriter, r *http.Request) {
@@ -291,6 +295,32 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 				out.Failure = err.Error()
 			}
 			writeJSON(rw, out)
+			return
+		case "session-sync-start":
+			var in davsync.SessionRetry
+			if err := json.NewDecoder(http.MaxBytesReader(rw, r.Body, 4096)).Decode(&in); err != nil {
+				fail(rw, err)
+				return
+			}
+			job, err := davsync.StartSessionSync(in)
+			if err != nil {
+				fail(rw, err)
+				return
+			}
+			writeJSON(rw, job)
+			return
+		case "session-restore-choices":
+			var in struct{ Offset int }
+			if err := json.NewDecoder(http.MaxBytesReader(rw, r.Body, 4096)).Decode(&in); err != nil {
+				fail(rw, err)
+				return
+			}
+			page, err := davsync.RestoreChoices(ctx, in.Offset)
+			if err != nil {
+				fail(rw, err)
+				return
+			}
+			writeJSON(rw, page)
 			return
 		case "session-sync":
 			result, err := davsync.SyncLocalSessions(sessionUploadContext(ctx))

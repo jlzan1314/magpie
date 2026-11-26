@@ -5859,3 +5859,8 @@ body.linux .action-confirm::backdrop { -webkit-backdrop-filter: none; backdrop-f
   }
   .editor.session-batch-form > label { text-align: start; }
 }
+
+.sync-session-row [hidden] { display: none; }
+.session-backup-failures summary { cursor: pointer; color: var(--fg-2); font-size: 12px; }
+.session-backup-failures .sub { overflow-wrap: anywhere; }
+.session-batch-manager .stack button { text-align: start; }

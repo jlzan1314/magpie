@@ -42,22 +42,31 @@ func (b *batchGzipBuffer) Write(p []byte) (int, error) {
 type SessionBatchRequest struct {
 	Sources []sessions.BatchSource `json:"sources"`
 	All     bool                   `json:"all"`
+	Entry   string                 `json:"entry,omitempty"`
 	Backups []string               `json:"backups"`
 	Targets []string               `json:"targets"`
 	Cwd     string                 `json:"cwd"`
 }
 
 type SessionBatchResult struct {
-	Backup        string                 `json:"backup,omitempty"`
-	Remote        bool                   `json:"remote"`
-	Conversations int                    `json:"conversations"`
-	Duplicates    int                    `json:"duplicates"`
-	Uploaded      int                    `json:"uploaded"`
-	Skipped       int                    `json:"skipped"`
-	Imports       []sessions.BatchImport `json:"imports,omitempty"`
+	Backup        string                  `json:"backup,omitempty"`
+	Remote        bool                    `json:"remote"`
+	Conversations int                     `json:"conversations"`
+	Duplicates    int                     `json:"duplicates"`
+	Uploaded      int                     `json:"uploaded"`
+	Skipped       int                     `json:"skipped"`
+	Failed        []sessions.BatchFailure `json:"failed,omitempty"`
+	Imports       []sessions.BatchImport  `json:"imports,omitempty"`
+}
+
+type batchEntryInfo struct {
+	Title   string                 `json:"title,omitempty"`
+	Sources []sessions.BatchSource `json:"sources,omitempty"`
 }
 
 type batchManifest struct {
+	Device  string              `json:"device,omitempty"`
+	Info    []batchEntryInfo    `json:"info,omitempty"`
 	Version int                 `json:"version"`
 	Entries []string            `json:"entries"`
 	Parts   map[string][]string `json:"parts,omitempty"`
@@ -68,7 +77,7 @@ type batchStore struct {
 	passphrase string
 	batchID    string
 	remoteDir  string
-	onPrepared func(string)
+	onPrepared func(string) error
 }
 
 // RunSessionBatch captures selected local sessions and optional earlier
@@ -84,30 +93,40 @@ func RunSessionBatch(ctx context.Context, req SessionBatchRequest) (SessionBatch
 
 var errEmptySessionBatch = errors.New("select sessions or a session backup")
 
-func runSessionBatch(ctx context.Context, c Config, req SessionBatchRequest, onPrepared func(string)) (SessionBatchResult, error) {
+func runSessionBatch(ctx context.Context, c Config, req SessionBatchRequest, onPrepared func(string, []sessions.BatchFailure) error) (SessionBatchResult, error) {
 	ctx = withSessionDAVTimeouts(ctx)
 	var result SessionBatchResult
 	d, err := newDAV(c)
 	if err != nil {
 		return result, err
 	}
-	store := batchStore{dav: d, passphrase: c.Passphrase, onPrepared: onPrepared}
+	store := batchStore{dav: d, passphrase: c.Passphrase}
 	if err := sessions.CheckBatchTargets(req.Targets, strings.TrimSpace(req.Cwd)); err != nil {
 		return result, err
 	}
+	if req.Entry != "" && (len(req.Backups) != 1 || req.All || len(req.Sources) > 0 || !validBatchID(req.Entry)) {
+		return result, errors.New("choose one backup to restore a single conversation")
+	}
 	build := req.All || len(req.Sources) > 0 || len(req.Backups) > 1
-	entries, err := sessions.CollectBatch(ctx, req.Sources, req.All)
+	entries, failures, err := sessions.CollectAvailableBatch(ctx, req.Sources, req.All)
+	result.Failed = failures
+	if onPrepared != nil {
+		store.onPrepared = func(id string) error { return onPrepared(id, failures) }
+	}
 	if err != nil {
 		return result, err
 	}
 	for _, name := range req.Backups {
-		old, err := store.load(ctx, strings.TrimSpace(name))
+		old, err := store.loadEntries(ctx, strings.TrimSpace(name), req.Entry)
 		if err != nil {
 			return result, err
 		}
 		entries = append(entries, old...)
 	}
 	if len(entries) == 0 {
+		if len(result.Failed) != 0 {
+			return result, errors.New(result.Failed[0].Error)
+		}
 		return result, errEmptySessionBatch
 	}
 	merged := sessions.MergeBatch(entries)
@@ -118,6 +137,10 @@ func runSessionBatch(ctx context.Context, c Config, req SessionBatchRequest, onP
 		result.Backup, stats, err = store.save(ctx, merged, !c.FollowServer, batchPartSize)
 		result.Remote = err == nil && !c.FollowServer
 		result.Uploaded, result.Skipped = stats.uploaded, stats.skipped
+		result.Failed = append(result.Failed, stats.failed...)
+		if len(stats.failed) > 0 {
+			result.Conversations = stats.conversations
+		}
 		if err != nil {
 			// A local backup ID is still useful after a network failure.
 			return result, err
@@ -126,19 +149,28 @@ func runSessionBatch(ctx context.Context, c Config, req SessionBatchRequest, onP
 		result.Backup = strings.TrimSpace(req.Backups[0])
 	}
 	if len(req.Targets) != 0 {
+		if len(result.Failed) > 0 && result.Remote {
+			merged, err = store.load(ctx, result.Backup)
+			if err != nil {
+				return result, err
+			}
+		}
 		result.Imports, err = sessions.ImportBatch(ctx, merged, req.Targets, strings.TrimSpace(req.Cwd))
 	}
 	return result, err
 }
 
 type batchPublishStats struct {
-	uploaded int
-	skipped  int
+	failed        []sessions.BatchFailure
+	conversations int
+	uploaded      int
+	skipped       int
 }
 
 func (s batchStore) save(ctx context.Context, entries []sessions.BatchConversation, publish bool, partSize int) (string, batchPublishStats, error) {
 	var stats batchPublishStats
-	manifest := batchManifest{Version: 2}
+	device, _ := os.Hostname()
+	manifest := batchManifest{Version: 2, Device: device}
 	prepared := make(map[string][]string)
 	staging := ""
 	for _, entry := range entries {
@@ -151,6 +183,7 @@ func (s batchStore) save(ctx context.Context, entries []sessions.BatchConversati
 		}
 		id := batchDigest(data)
 		manifest.Entries = append(manifest.Entries, id)
+		manifest.Info = append(manifest.Info, batchEntryInfo{entry.Title, entry.Sources})
 		if len(data) <= partSize {
 			continue
 		}
@@ -224,79 +257,98 @@ func (s batchStore) save(ctx context.Context, entries []sessions.BatchConversati
 		return s.batchID, stats, nil
 	}
 	if s.onPrepared != nil {
-		s.onPrepared(s.batchID)
+		if err := s.onPrepared(s.batchID); err != nil {
+			return s.batchID, stats, err
+		}
 	}
-	return s.publish(ctx, objects)
+	return s.publish(ctx, objects, manifest)
 }
 
 // publish sends the prepared files and then the manifest. It is also the
 // resume path, where the manifest on disk supplies the same objects.
-func (s batchStore) publish(ctx context.Context, objects []batchObject) (string, batchPublishStats, error) {
+func batchHint(c Config) string { return filepath.Join(settings.Dir(), batchDir, "last-"+stateKey(c)) }
+
+func (s batchStore) publish(ctx context.Context, objects []batchObject, manifest batchManifest) (string, batchPublishStats, error) {
+	return s.publishFrom(ctx, objects, manifest, nil)
+}
+
+func (s batchStore) publishFrom(ctx context.Context, objects []batchObject, manifest batchManifest, reuse *batchStore) (string, batchPublishStats, error) {
 	var stats batchPublishStats
-	hint := filepath.Join(settings.Dir(), batchDir, "last-"+stateKey(Config{URL: s.dav.base.String(), User: s.dav.user, Passphrase: s.passphrase}))
+	hint := batchHint(Config{URL: s.dav.base.String(), User: s.dav.user, Passphrase: s.passphrase})
 	last, _ := os.ReadFile(hint)
 	previous := s
 	previous.batchID = string(last)
-	s, sizes, err := s.locateRemoteBatch(ctx)
+	if reuse != nil {
+		previous = *reuse
+	}
+	var sizes, previousSizes map[string]remoteSessionFile
+	err := retrySessionOperation(ctx, func() error {
+		var err error
+		s, sizes, err = s.locateRemoteBatch(ctx)
+		if err != nil {
+			return err
+		}
+		if validBatchID(previous.batchID) && previous.batchID != s.batchID {
+			previous.remoteDir = ""
+			previous, previousSizes, err = previous.locateRemoteBatch(ctx)
+		}
+		return err
+	})
 	if err != nil {
 		return s.batchID, stats, err
 	}
-	var previousSizes map[string]int64
-	if validBatchID(previous.batchID) && previous.batchID != s.batchID {
-		previous.remoteDir = ""
-		previous, previousSizes, err = previous.locateRemoteBatch(ctx)
-		if err != nil {
-			return s.batchID, stats, err
+	objects = append(objects, batchObject{"backups", s.batchID})
+	var total int64
+	for _, o := range objects {
+		if info, err := os.Stat(s.filename(o.kind, o.id)); err == nil {
+			total += info.Size()
 		}
 	}
+	updateSessionActivity(ctx, func(a *SessionActivity) {
+		a.Phase = "uploading"
+		a.Count = len(objects)
+		a.Objects = 0
+		a.Total = total
+		a.Bytes = 0
+	})
 	ready := false
-	for _, object := range append(objects, batchObject{"backups", s.batchID}) {
-		kind, id := object.kind, object.id
-		file := s.filename(kind, id)
+	rejected := map[batchObject]error{}
+	for _, object := range objects {
+		if object.kind == "backups" && len(rejected) > 0 {
+			return s.publishPartial(ctx, manifest, rejected)
+		}
+		file := s.filename(object.kind, object.id)
 		info, err := os.Stat(file)
 		if err != nil {
-			return s.batchID, stats, err
-		}
-		name := s.remoteObjectPath(kind, id)[2]
-		same, exists, err := s.dav.remoteSizeMatches(ctx, s.url(kind, id), info.Size(), sizes, name)
-		if err != nil {
-			return s.batchID, stats, err
-		}
-		if same {
-			stats.skipped++
-			continue
-		}
-		if !ready {
-			for _, dirs := range [][]string{{folder}, {folder, s.remoteDir}, {folder, s.remoteDir, s.batchID}} {
-				if err := s.dav.ensureSessionCollection(ctx, dirs); err != nil {
-					return s.batchID, stats, err
-				}
+			if object.kind != "backups" && len(manifest.Info) == len(manifest.Entries) && errors.Is(err, fs.ErrNotExist) {
+				rejected[object] = err
+				continue
 			}
-			ready = true
+			return s.batchID, stats, err
 		}
-		if previousSizes != nil && kind != "backups" && !exists {
-			if size, found := previousSizes[previous.remoteObjectPath(kind, id)[2]]; found && size == info.Size() {
-				copied, err := s.copyObject(ctx, previous, object, size)
-				if err != nil {
-					return s.batchID, stats, err
-				}
-				if copied {
-					stats.skipped++
-					continue
-				}
-			}
-		}
-		raw, err := readBatchFile(file)
+		var skipped bool
+		probe := sizes
+		err = retrySessionOperation(ctx, func() error {
+			var err error
+			skipped, err = s.publishObject(ctx, object, info.Size(), probe, previous, previousSizes, &ready)
+			probe = nil // a lost response may have committed the object
+			return err
+		})
 		if err != nil {
+			var bad *sessionObjectRejected
+			var temporary *temporarySessionHTTP
+			if object.kind != "backups" && (errors.As(err, &bad) || errors.As(err, &temporary)) && len(manifest.Info) == len(manifest.Entries) {
+				rejected[object] = err
+				continue
+			}
 			return s.batchID, stats, err
 		}
-		if err := s.publishRaw(ctx, kind, id, raw, exists); errors.Is(err, errNotModified) {
+		if skipped {
 			stats.skipped++
-			continue
-		} else if err != nil {
-			return s.batchID, stats, err
+		} else {
+			stats.uploaded++
 		}
-		stats.uploaded++
+		updateSessionActivity(ctx, func(a *SessionActivity) { a.Sending = 0; a.Objects++; a.Bytes += info.Size() })
 	}
 	if previous.batchID != s.batchID {
 		_ = steady.WriteFile(hint, []byte(s.batchID), 0o600)
@@ -304,9 +356,96 @@ func (s batchStore) publish(ctx context.Context, objects []batchObject) (string,
 	return s.batchID, stats, nil
 }
 
+func (s batchStore) publishObject(ctx context.Context, object batchObject, size int64, sizes map[string]remoteSessionFile, previous batchStore, previousSizes map[string]remoteSessionFile, ready *bool) (bool, error) {
+	kind, id := object.kind, object.id
+	target := s.url(kind, id)
+	same, exists, err := s.dav.remoteSizeMatches(ctx, target, size, sizes, s.remoteObjectPath(kind, id)[2])
+	if err != nil {
+		return false, err
+	}
+	if same {
+		match, err := s.receiptMatches(ctx, kind, id, size, sizes[s.remoteObjectPath(kind, id)[2]].etag)
+		if err != nil || match {
+			return match, err
+		}
+	}
+	if !*ready {
+		for _, dirs := range [][]string{{folder}, {folder, s.remoteDir}, {folder, s.remoteDir, s.batchID}} {
+			if err := s.dav.ensureSessionCollection(ctx, dirs); err != nil {
+				return false, err
+			}
+		}
+		*ready = true
+	}
+	if !exists && previousSizes != nil && kind != "backups" {
+		if n, found := previousSizes[previous.remoteObjectPath(kind, id)[2]]; found && n.size == size {
+			copied, err := s.copyObject(ctx, previous, object, size)
+			if err != nil || copied {
+				return copied, err
+			}
+		}
+	}
+	raw, err := readBatchFile(s.filename(kind, id))
+	if err != nil {
+		return false, err
+	}
+	err = s.publishRaw(ctx, kind, id, raw, exists)
+	if errors.Is(err, errNotModified) {
+		return true, nil
+	}
+	return false, err
+}
+
+func (s batchStore) receiptFile(kind, id string) string {
+	key := stateKey(Config{URL: s.url(kind, id), User: s.dav.user, Passphrase: s.passphrase})
+	return filepath.Join(settings.Dir(), batchDir, s.batchID, ".verified", key)
+}
+
+func (s batchStore) receiptMatches(ctx context.Context, kind, id string, size int64, listedTag string) (bool, error) {
+	tag, err := os.ReadFile(s.receiptFile(kind, id))
+	if err != nil || len(tag) == 0 {
+		return false, nil
+	}
+	if listedTag != "" {
+		return listedTag == string(tag), nil
+	}
+	res, err := s.dav.send(ctx, http.MethodHead, s.url(kind, id), nil, map[string]string{"Accept-Encoding": "identity"})
+	if err != nil {
+		return false, err
+	}
+	res.Body.Close()
+	return res.StatusCode == http.StatusOK && res.Header.Get("ETag") == string(tag) && (res.ContentLength == size || res.ContentLength <= 0), nil
+}
+
+func (s batchStore) verifyResponse(kind, id string, raw []byte, tag string) error {
+	if err := s.verifyObject(raw, kind, id); err != nil {
+		return err
+	}
+	if len(tag) >= 2 && tag[0] == '"' && tag[len(tag)-1] == '"' {
+		_ = writeBatchFile(s.receiptFile(kind, id), []byte(tag))
+	}
+	return nil
+}
+
+func (s batchStore) verifyRemote(ctx context.Context, kind, id string) error {
+	res, err := s.dav.do(ctx, http.MethodGet, s.url(kind, id), nil, map[string]string{"Accept-Encoding": "identity"})
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("verifying session backup: HTTP %d", res.StatusCode)
+	}
+	raw, err := readBatchLimited(res.Body)
+	if err != nil {
+		return err
+	}
+	return s.verifyResponse(kind, id, raw, res.Header.Get("ETag"))
+}
+
 // A known backup stays in the collection where it was first uploaded.
 // This keeps same-size skips and interrupted transfers valid after an upgrade.
-func (s batchStore) locateRemoteBatch(ctx context.Context) (batchStore, map[string]int64, error) {
+func (s batchStore) locateRemoteBatch(ctx context.Context) (batchStore, map[string]remoteSessionFile, error) {
 	if s.remoteDir != "" {
 		sizes, err := s.dav.listRemoteSizes(ctx, folder, s.remoteDir, s.batchID)
 		return s, sizes, err
@@ -325,7 +464,7 @@ func (s batchStore) locateRemoteBatch(ctx context.Context) (batchStore, map[stri
 	return s, sizes, nil
 }
 
-func (s batchStore) remoteBatchContents(ctx context.Context) (map[string]int64, bool, error) {
+func (s batchStore) remoteBatchContents(ctx context.Context) (map[string]remoteSessionFile, bool, error) {
 	sizes, err := s.dav.listRemoteSizes(ctx, folder, s.remoteDir, s.batchID)
 	if err != nil || sizes != nil {
 		return sizes, len(sizes) != 0, err
@@ -345,15 +484,7 @@ func (s batchStore) copyObject(ctx context.Context, previous batchStore, object 
 	res.Body.Close()
 	switch res.StatusCode {
 	case http.StatusCreated, http.StatusNoContent, http.StatusOK, http.StatusPreconditionFailed:
-		same, _, err := s.dav.remoteSizeMatches(ctx, target, size, nil, "")
-		if err != nil || same {
-			return same, err
-		}
-		raw, err := s.remote(ctx, object.kind, object.id)
-		if err != nil {
-			return false, err
-		}
-		err = s.verifyObject(raw, object.kind, object.id)
+		err := s.verifyRemote(ctx, object.kind, object.id)
 		return err == nil, err
 	case http.StatusNotFound, http.StatusGone, http.StatusConflict, http.StatusForbidden, http.StatusBadRequest, http.StatusMethodNotAllowed, http.StatusNotImplemented:
 		return false, nil
@@ -393,11 +524,27 @@ func resumeSessionBatch(ctx context.Context, c Config, id, remoteDir string) (Se
 	if !manifest.valid(2) {
 		return result, errors.New("invalid session backup manifest")
 	}
+	objects, err := manifest.objects()
+	if err != nil {
+		return result, err
+	}
+	result.Conversations = len(manifest.Entries)
+	back, stats, err := s.publish(ctx, objects, manifest)
+	result.Backup, result.Remote = back, err == nil
+	result.Uploaded, result.Skipped = stats.uploaded, stats.skipped
+	result.Failed = append(result.Failed, stats.failed...)
+	if len(stats.failed) > 0 {
+		result.Conversations = stats.conversations
+	}
+	return result, err
+}
+
+func (manifest batchManifest) objects() ([]batchObject, error) {
 	var objects []batchObject
 	seen := make(map[string]bool)
 	for _, key := range manifest.Entries {
 		if !validBatchID(key) {
-			return result, errors.New("invalid session backup object ID")
+			return nil, errors.New("invalid session backup object ID")
 		}
 		parts, split := manifest.Parts[key]
 		if !split {
@@ -405,11 +552,11 @@ func resumeSessionBatch(ctx context.Context, c Config, id, remoteDir string) (Se
 			continue
 		}
 		if len(parts) < 2 {
-			return result, errors.New("invalid session backup parts")
+			return nil, errors.New("invalid session backup parts")
 		}
 		for _, part := range parts {
 			if !validBatchID(part) {
-				return result, errors.New("invalid session backup part ID")
+				return nil, errors.New("invalid session backup part ID")
 			}
 			if !seen[part] {
 				objects = append(objects, batchObject{"parts", part})
@@ -417,21 +564,21 @@ func resumeSessionBatch(ctx context.Context, c Config, id, remoteDir string) (Se
 			}
 		}
 	}
-	result.Conversations = len(manifest.Entries)
-	back, stats, err := s.publish(ctx, objects)
-	result.Backup, result.Remote = back, err == nil
-	result.Uploaded, result.Skipped = stats.uploaded, stats.skipped
-	return result, err
+	return objects, nil
 }
 
 func (s batchStore) load(ctx context.Context, id string) ([]sessions.BatchConversation, error) {
+	return s.loadEntries(ctx, id, "")
+}
+
+func (s batchStore) loadEntries(ctx context.Context, id, entry string) ([]sessions.BatchConversation, error) {
 	s.batchID = id
 	var manifest batchManifest
-	err := s.loadObject(ctx, "backups", id, &manifest)
+	err := loadBatchObject(ctx, &s, "backups", id, &manifest)
 	version := 2
 	if errors.Is(err, errSessionBackupMissing) {
 		s.batchID, version = "", 1
-		err = s.loadObject(ctx, "backups", id, &manifest)
+		err = loadBatchObject(ctx, &s, "backups", id, &manifest)
 	}
 	if err != nil {
 		return nil, err
@@ -441,6 +588,9 @@ func (s batchStore) load(ctx context.Context, id string) ([]sessions.BatchConver
 	}
 	out := make([]sessions.BatchConversation, 0, len(manifest.Entries))
 	for _, key := range manifest.Entries {
+		if entry != "" && entry != key {
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -453,10 +603,13 @@ func (s batchStore) load(ctx context.Context, id string) ([]sessions.BatchConver
 			if err := openBatchStream(reader, key, &c); err != nil {
 				return nil, err
 			}
-		} else if err := s.loadObject(ctx, "conversations", key, &c); err != nil {
+		} else if err := loadBatchObject(ctx, &s, "conversations", key, &c); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
+	}
+	if entry != "" && len(out) == 0 {
+		return nil, errors.New("conversation is missing from this backup")
 	}
 	return out, nil
 }
@@ -507,8 +660,10 @@ func (s batchStore) remoteObjectPath(kind, id string) []string {
 func (s batchStore) keepLocal(kind, id string, plain []byte) ([]byte, error) {
 	p := s.filename(kind, id)
 	if raw, err := readBatchFile(p); err == nil {
-		err = s.open(raw, id, nil)
-		return raw, err
+		if err = s.open(raw, id, nil); err == nil || errors.Is(err, backup.ErrPassphrase) {
+			return raw, err
+		}
+		// The source still matches this content ID. Regenerate a corrupt cache.
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
@@ -613,42 +768,68 @@ func checkBatchJSONTail(r io.Reader) error {
 	}
 }
 
-func (s *batchStore) loadObject(ctx context.Context, kind, id string, into any) error {
-	raw, fetched, err := s.loadRaw(ctx, kind, id)
-	if err != nil {
-		return err
+func loadBatchObject[T any](ctx context.Context, s *batchStore, kind, id string, into *T) error {
+	value, err := readVerifiedBatchFile(ctx, s, kind, id, func(raw []byte) (T, error) {
+		var decoded T
+		err := s.open(raw, id, &decoded)
+		return decoded, err
+	})
+	if err == nil {
+		*into = value
 	}
-	if err := s.open(raw, id, into); err != nil {
-		return err
-	}
-	if fetched {
-		return writeBatchFile(s.filename(kind, id), raw)
-	}
-	return nil
+	return err
 }
 
-func (s *batchStore) loadRaw(ctx context.Context, kind, id string) ([]byte, bool, error) {
+// A damaged local cache can be repaired by a verified remote copy. An
+// unauthenticated replacement never reaches disk or the import target.
+func readVerifiedBatchFile[T any](ctx context.Context, s *batchStore, kind, id string, decode func([]byte) (T, error)) (T, error) {
+	var zero T
 	if !validBatchID(id) {
-		return nil, false, errors.New("enter a valid session backup ID")
+		return zero, errors.New("enter a valid session backup ID")
 	}
-	p := s.filename(kind, id)
-	raw, err := readBatchFile(p)
-	fetched := errors.Is(err, fs.ErrNotExist)
-	if fetched {
-		raw, err = s.remote(ctx, kind, id)
+	file := s.filename(kind, id)
+	raw, localErr := readBatchFile(file)
+	if localErr == nil {
+		value, err := decode(raw)
+		if err == nil {
+			return value, nil
+		}
+		localErr = err
 	}
-	return raw, fetched, err
+	if s.dav == nil || ctx.Err() != nil {
+		return zero, localErr
+	}
+	raw, err := s.remote(ctx, kind, id)
+	if err != nil {
+		if errors.Is(localErr, fs.ErrNotExist) {
+			return zero, err
+		}
+		return zero, errors.Join(localErr, err)
+	}
+	value, err := decode(raw)
+	if err != nil {
+		return zero, err
+	}
+	if err := writeBatchFile(file, raw); err != nil {
+		return zero, err
+	}
+	return value, nil
 }
 
 func (s *batchStore) remote(ctx context.Context, kind, id string) ([]byte, error) {
-	raw, err := s.remoteAt(ctx, kind, id)
-	if s.batchID != "" && s.remoteDir == "" && errors.Is(err, errSessionBackupMissing) {
-		s.remoteDir = batchDir
+	var raw []byte
+	err := retrySessionOperation(ctx, func() error {
+		var err error
 		raw, err = s.remoteAt(ctx, kind, id)
-		if err != nil {
-			s.remoteDir = ""
+		if s.batchID != "" && s.remoteDir == "" && errors.Is(err, errSessionBackupMissing) {
+			s.remoteDir = batchDir
+			raw, err = s.remoteAt(ctx, kind, id)
+			if err != nil {
+				s.remoteDir = ""
+			}
 		}
-	}
+		return err
+	})
 	return raw, err
 }
 
@@ -685,7 +866,7 @@ func (s batchStore) publishRaw(ctx context.Context, kind, id string, raw []byte,
 			return readErr
 		}
 		if res.StatusCode == http.StatusOK {
-			if err := s.verifyObject(prior, kind, id); err == nil {
+			if err := s.verifyResponse(kind, id, prior, res.Header.Get("ETag")); err == nil {
 				return errNotModified
 			} else if errors.Is(err, backup.ErrPassphrase) {
 				return err
@@ -706,20 +887,14 @@ func (s batchStore) publishRaw(ctx context.Context, kind, id string, raw []byte,
 	res.Body.Close()
 	switch res.StatusCode {
 	case http.StatusCreated, http.StatusNoContent, http.StatusOK:
-		got, err := s.remote(ctx, kind, id)
-		if err != nil {
-			return err
-		}
-		return s.verifyObject(got, kind, id)
+		return s.verifyRemote(ctx, kind, id)
 	case http.StatusPreconditionFailed:
-		got, err := s.remote(ctx, kind, id)
-		if err != nil {
-			return err
-		}
-		if err := s.verifyObject(got, kind, id); err != nil {
+		if err := s.verifyRemote(ctx, kind, id); err != nil {
 			return err
 		}
 		return errNotModified
+	case http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		return &sessionObjectRejected{res.Status}
 	default:
 		return fmt.Errorf("writing session backup to WebDAV: HTTP %d", res.StatusCode)
 	}
