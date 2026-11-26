@@ -407,7 +407,7 @@ func MergeSignIns(local, remote *SignIns, prev map[string]string) (*SignIns, Sig
 	// a computer joining: Codex, signed out here, is signed in to the
 	// account it was on elsewhere. Only then: one signed out of it here
 	// later stays signed out
-	if c, ok := shared[out.Codex]; ok && c.login != nil && prev == nil {
+	if c, ok := shared[out.Codex]; ok && c.login != nil && prev == nil && !CodexNativeAccount() {
 		plan.codex = &c
 	}
 	sort.Slice(plan.put, func(i, j int) bool { return plan.put[i].id < plan.put[j].id })
@@ -630,12 +630,14 @@ func applyPlugins(put []signInRec, gone map[string]bool, seen map[string]string,
 	})
 }
 
+var CodexNativeAccount = func() bool { return false }
+
 // signCodexIn signs Codex in to l where it is signed out: auth.json (or
 // the store its config.toml names) gets l's sign-in, written beside the
 // old file and renamed in. Codex signed in, its sign-in unreadable, or
 // its account removed in magpie: nothing is written.
 func signCodexIn(l savedLogin) (bool, error) {
-	if l.Agent != "codex" || len(l.Auth) == 0 || accountRemoved("codex") {
+	if l.Agent != "codex" || CodexNativeAccount() || len(l.Auth) == 0 || accountRemoved("codex") {
 		return false, nil
 	}
 	home := codexHome()

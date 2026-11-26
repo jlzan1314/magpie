@@ -906,7 +906,7 @@ func readView(problems []Problem, glance bool) (*View, error) {
 		sv.Gone = s.Gone
 		v.Skills = append(v.Skills, sv)
 	}
-	v.FoundServers = foundServersOf(l, targets)
+	v.FoundServers = foundServers(l)
 	for i := range v.FoundServers {
 		v.FoundServers[i].Icon = serverIcon(l, v.FoundServers[i].Server)
 	}
@@ -1174,7 +1174,7 @@ func ImportServers(names []string, source string) ([]string, *Result, error) {
 	nothing := errors.New("no MCP servers to import")
 	var imported []string
 	result, err := change(func(l *Library) error {
-		targets := Targets()
+		targets := readableTargets()
 		if source != "" {
 			index := slices.IndexFunc(targets, func(target *Target) bool { return target.Agent.ID == source })
 			if index < 0 {

@@ -211,11 +211,12 @@ type unservedJSON struct {
 }
 
 type agentJSON struct {
-	ID     string      `json:"id"`
-	Name   string      `json:"name"`
-	Icon   string      `json:"icon"`
-	Path   string      `json:"path"`
-	Fields []fieldJSON `json:"fields"`
+	NativeAccount *bool       `json:"nativeAccount,omitempty"`
+	ID            string      `json:"id"`
+	Name          string      `json:"name"`
+	Icon          string      `json:"icon"`
+	Path          string      `json:"path"`
+	Fields        []fieldJSON `json:"fields"`
 	// Own: the user's own settings of the agent's (agent.Field.Own,
 	// Claude Code's permission mode), apart from Fields so no picker on
 	// its row draws them: agentcompact.js folds them under Advanced
@@ -1650,6 +1651,15 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			how = &c
 			if err == nil {
 				resumeOnWire(a)
+			}
+		case "native-account":
+			var request struct{ On *bool }
+			if err = json.NewDecoder(http.MaxBytesReader(rw, r.Body, 4096)).Decode(&request); err == nil {
+				if request.On == nil {
+					err = errors.New("native account mode requires an on value")
+				} else {
+					err = a.SetNativeAccount(*request.On)
+				}
 			}
 		case "disconnect":
 			err = a.Disconnect()
@@ -3445,6 +3455,10 @@ func state() stateJSON {
 		vals := a.Values()
 		now[a.ID] = vals
 		aj := agentJSON{ID: a.ID, Name: a.Name, Icon: a.Icon, Path: tilde(a.Path), Fields: agentFields(a, vals), Own: ownFields(a, vals)}
+		if a.SupportsNativeAccount() {
+			v := a.NativeAccount()
+			aj.NativeAccount = &v
+		}
 		aj.Models = agentModelCount(a, aj.Fields)
 		aj.Menu = a.ListsModels
 		aj.NoNames = a.NoNames

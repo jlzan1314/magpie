@@ -437,6 +437,9 @@ var ErrNoTelemetry = errors.New("magpie knows no switch for this agent's telemet
 
 // SetTelemetry turns a's own telemetry off, or back to what it was.
 func (a *Agent) SetTelemetry(off bool) error {
+	if a.NativeAccount() {
+		return ErrNativeAccount
+	}
 	if a.Telemetry == nil {
 		return ErrNoTelemetry
 	}

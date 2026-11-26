@@ -49,7 +49,7 @@ func TelemetryAllOff() bool {
 // is on and it isn't off yet, marking it as the switch's. It says why it
 // couldn't (a value of the user's own, a file that doesn't read).
 func KeepTelemetryOff(a *Agent) error {
-	if a.Telemetry == nil {
+	if a.Telemetry == nil || a.NativeAccount() {
 		return nil
 	}
 	telemetryAllMu.Lock()
@@ -96,7 +96,7 @@ func SetTelemetryAll(off bool) error {
 	var errs []error
 	if off {
 		for _, a := range Detected() {
-			if a.Telemetry == nil {
+			if a.Telemetry == nil || a.NativeAccount() {
 				continue
 			}
 			if err := keepTelemetryOff(a.Telemetry); err != nil {
@@ -108,6 +108,9 @@ func SetTelemetryAll(off bool) error {
 	// every agent, found here or not: one taken away since keeps no key of
 	// magpie's behind
 	for _, a := range All() {
+		if a.NativeAccount() {
+			continue
+		}
 		if err := giveBackTelemetry(a.Telemetry); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", a.Name, err))
 		}
@@ -184,6 +187,8 @@ func giveBackTelemetryAll() {
 		return
 	}
 	for _, a := range All() {
-		_ = giveBackTelemetry(a.Telemetry)
+		if !a.NativeAccount() {
+			_ = giveBackTelemetry(a.Telemetry)
+		}
 	}
 }

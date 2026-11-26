@@ -107,6 +107,9 @@ func record(id, key, v string) {
 // which read as changed outside magpie, and the drift kept the row up
 // among the connected ones while it said Not connected (#834).
 func (a *Agent) Apply(key, v string) error {
+	if a.NativeAccount() {
+		return ErrNativeAccount
+	}
 	if a.Native != nil {
 		return a.Native.Apply(key, v)
 	}
@@ -486,6 +489,9 @@ func orDefault(v string) string {
 // catches. A replaced field brings back the others magpie set with it.
 // Either way the record is renewed, so a use before now no longer counts.
 func (a *Agent) Reapply() error {
+	if a.NativeAccount() {
+		return ErrNativeAccount
+	}
 	if a.Native != nil {
 		return a.Native.Connect()
 	}
@@ -615,6 +621,9 @@ func (a *Agent) Wired() bool {
 // model picked in magpie in one click, both): the agent gets magpie's whole
 // list, and Disconnect puts back what it had before.
 func (a *Agent) Pick(key, v string) error {
+	if a.NativeAccount() {
+		return ErrNativeAccount
+	}
 	if a.Native != nil {
 		value, err := a.Spell(key, v)
 		if err != nil {
@@ -708,6 +717,9 @@ func (a *Agent) rewired(err error) {
 
 // ConnectHow is Connect, saying how the model was chosen.
 func (a *Agent) ConnectHow() (c Connection, err error) {
+	if a.NativeAccount() {
+		return Connection{}, ErrNativeAccount
+	}
 	defer func() { a.rewired(err) }()
 	if a.Native != nil {
 		return Connection{How: "joined"}, a.Native.Connect()
@@ -724,7 +736,9 @@ const disconnectedKey = ".disconnected"
 
 // Disconnected reports whether the user disconnected the agent and hasn't
 // connected it since.
-func (a *Agent) Disconnected() bool { return stashShared()[a.ID+disconnectedKey] == "1" }
+func (a *Agent) Disconnected() bool {
+	return a.NativeAccount() || stashShared()[a.ID+disconnectedKey] == "1"
+}
 
 // noModelLeft says why there is no model of magpie's to connect the agent
 // to: none added yet (NoModelsError), or every one taken out of its lists
@@ -747,6 +761,9 @@ func (a *Agent) noModelLeft() error {
 }
 
 func (a *Agent) connect() (Connection, error) {
+	if a.NativeAccount() {
+		return Connection{}, ErrNativeAccount
+	}
 	forget(a.ID + disconnectedKey)
 	// what it is on now, for Disconnect to put back what it can't
 	// otherwise (Goose's own model)
@@ -929,7 +946,7 @@ func (a *Agent) Disconnect() (err error) {
 		}
 		return a.Native.Execute(plan)
 	}
-	if !a.Wired() {
+	if !a.Wired() && !(a.NativeAccount() && a.Routed != nil && a.Routed()) {
 		return nil
 	}
 	// the user's say, kept till they connect it again: nothing magpie does

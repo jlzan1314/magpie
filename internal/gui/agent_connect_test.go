@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/library"
+	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -69,6 +71,43 @@ func TestAgentConnectAPI(t *testing.T) {
 	if a.Wired || a.Fields[0].Value != "m2" {
 		t.Fatalf("after disconnect: wired %v, model %q", a.Wired, a.Fields[0].Value)
 	}
+	call("/api/agents/connect/codex", "{}")
+	a = codex(call("/api/agents/native-account/codex", `{"on":true}`))
+	if a.NativeAccount == nil || !*a.NativeAccount || a.Wired || a.Fields[0].Value != "m2" {
+		t.Fatalf("native mode did not restore Codex: %+v", a)
+	}
+	before, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, endpoint := range []struct{ path, body string }{
+		{"/api/agents/connect/codex", "{}"},
+		{"/api/set", `{"agent":"codex","field":"model","value":"relay/m1"}`},
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", endpoint.path, strings.NewReader(endpoint.body)))
+		if rec.Code < 400 || !strings.Contains(rec.Body.String(), "native account") {
+			t.Fatalf("native mode must block %s: %d %s", endpoint.path, rec.Code, rec.Body)
+		}
+	}
+	if _, err := profile.ApplyFields(map[string]string{"codex.model": "relay/m1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := library.SaveServer("", library.Server{Name: "native-mode-fixture", Transport: "stdio", Command: "fixture", Agents: []string{"codex"}}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(cfg)
+	if err != nil || string(before) != string(after) {
+		t.Fatalf("applying synced data changed Codex config: %s %v", after, err)
+	}
+	a = codex(call("/api/agents/native-account/codex", `{"on":false}`))
+	if a.NativeAccount == nil || *a.NativeAccount || a.Wired {
+		t.Fatalf("disabling mode changed Codex routing: %+v", a)
+	}
+	if a = codex(call("/api/agents/connect/codex", "{}")); !a.Wired {
+		t.Fatal("explicit reconnect did not restore Magpie routing")
+	}
+
 }
 
 // An omp profile's id is omp#<name>, and the Agents page asks for it with

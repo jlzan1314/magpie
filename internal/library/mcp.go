@@ -2081,7 +2081,7 @@ func appOwned(s *Server, a *agent.Agent) bool {
 	return false
 }
 
-func foundServers(l *Library) []Found { return foundServersOf(l, Targets()) }
+func foundServers(l *Library) []Found { return foundServersOf(l, readableTargets()) }
 
 // foundServersOf is foundServers among these agents.
 func foundServersOf(l *Library, targets []*Target) []Found {

@@ -1500,6 +1500,9 @@ func switchLoginBy(agent, user string, byMagpie bool) error {
 // the agent's own store, and answers the account it replaced: "" when there
 // was none, or the agent was on that one already.
 func switchSavedLogin(agent, user string) (from string, _ error) {
+	if agent == "codex" && CodexNativeAccount() {
+		return "", fmt.Errorf("Codex uses its native account; switch accounts in Codex")
+	}
 	if agent == "claude" {
 		// nor while Claude Code runs in the account's own directory for
 		// magpie (inSavedClaudeDir), which may refresh it there

@@ -99,6 +99,7 @@ func (p *Project) rel(abs string) string {
 // into each agent's folder there, and takes away those it wrote that it
 // no longer has.
 func (l *Library) syncProjectSubagents(p *Project, fail func(what string, err error)) {
+	nativeCodex := agent.NativeAccountEnabled("codex")
 	type want struct {
 		s  *Subagent
 		sp *subagentSpec
@@ -116,6 +117,9 @@ func (l *Library) syncProjectSubagents(p *Project, fail func(what string, err er
 			continue
 		}
 		for _, id := range p.Subagents[name] {
+			if id == "codex" && nativeCodex {
+				continue
+			}
 			if (id == "agy" || id == "antigravity") && slices.Contains(agyReserved, strings.ToLower(s.Name)) {
 				continue // a plugin's, which Antigravity wouldn't load
 			}
@@ -127,6 +131,10 @@ func (l *Library) syncProjectSubagents(p *Project, fail func(what string, err er
 	var kept []SubagentFile
 	done := map[string]bool{}
 	for _, f := range p.AgentFiles {
+		if nativeCodex && strings.HasPrefix(filepath.ToSlash(f.Path), ".codex/") {
+			kept = append(kept, f)
+			continue
+		}
 		abs := filepath.Join(p.Dir, filepath.FromSlash(f.Path))
 		if err := p.inside(abs); err != nil {
 			fail("subagent:"+f.Name, err)
