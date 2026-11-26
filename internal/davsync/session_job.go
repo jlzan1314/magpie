@@ -17,6 +17,9 @@ import (
 // SessionActivity is shared by windows on this device. Byte counts are for
 // sealed objects whose remote content has been verified or safely reused.
 type SessionActivity struct {
+	Imported      int                     `json:"imported,omitempty"`
+	ImportError   string                  `json:"importError,omitempty"`
+	ImportedAt    time.Time               `json:"importedAt,omitzero"`
 	Sending       int64                   `json:"sending,omitempty"`
 	Conversations int                     `json:"conversations"`
 	Uploaded      int                     `json:"uploaded"`
@@ -86,6 +89,8 @@ func (j *sessionJob) finish(r SessionBatchResult, err error) {
 	case err != nil:
 		j.view.Phase = "failed"
 		j.view.Error = err.Error()
+	case j.view.Phase == "importing" && r.Backup == "" && len(r.Failed) == 0:
+		j.view.Phase = "idle"
 	case len(r.Failed) > 0:
 		j.view.Phase = "partial"
 	default:
@@ -120,6 +125,7 @@ func SessionSyncActivity() SessionActivity {
 	st := loadState()
 	if st.Key == key && st.Sessions != nil {
 		s := st.Sessions
+		v.Imported, v.ImportedAt, v.ImportError = s.Imported, s.ImportedAt, s.ImportError
 		v.Latest, v.Last, v.Failed = s.Backup, s.At, s.Failed
 		if job == nil {
 			v.Conversations, v.Uploaded, v.Skipped = s.Conversations, s.Uploaded, s.Skipped

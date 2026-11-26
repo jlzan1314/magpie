@@ -15,6 +15,8 @@ import (
 // SessionPreferences holds this device's draft for the session batch form.
 // A draft may be saved before the user has chosen to run any transfer.
 type SessionPreferences struct {
+	AutoImport  bool                   `json:"autoImport,omitempty"`
+	ImportScope string                 `json:"importScope,omitempty"`
 	Entry       string                 `json:"entry,omitempty"`
 	EntryTitle  string                 `json:"entryTitle,omitempty"`
 	All         bool                   `json:"all"`
@@ -40,10 +42,25 @@ func LoadSessionPreferences() (SessionPreferences, error) {
 	if err := json.Unmarshal(raw, &prefs); err != nil {
 		return SessionPreferences{All: true}, err
 	}
+	if prefs.AutoImport {
+		c, ok := Load()
+		prefs.AutoImport = ok && prefs.ImportScope == stateKey(c)
+	}
 	return prefs, nil
 }
 
 func SaveSessionPreferences(prefs SessionPreferences) error {
+	prefs.ImportScope = ""
+	if prefs.AutoImport {
+		c, ok := Load()
+		if !ok || c.S3() || c.GitHub() || len(prefs.Targets) == 0 {
+			return errors.New("choose a WebDAV server and an import target")
+		}
+		if err := sessions.CheckBatchTargets(prefs.Targets, ""); err != nil {
+			return err
+		}
+		prefs.ImportScope = stateKey(c)
+	}
 	file := sessionPreferencesPath()
 	if err := lastgood.KeepUnparsed(file, lastgood.Into[SessionPreferences]); err != nil {
 		return err

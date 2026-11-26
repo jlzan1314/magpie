@@ -65,6 +65,7 @@ type batchEntryInfo struct {
 }
 
 type batchManifest struct {
+	Origin  string              `json:"origin,omitempty"`
 	Device  string              `json:"device,omitempty"`
 	Info    []batchEntryInfo    `json:"info,omitempty"`
 	Version int                 `json:"version"`
@@ -73,6 +74,8 @@ type batchManifest struct {
 }
 
 type batchStore struct {
+	localRoot  string
+	archive    fs.FS
 	dav        *dav
 	passphrase string
 	batchID    string
@@ -108,7 +111,11 @@ func runSessionBatch(ctx context.Context, c Config, req SessionBatchRequest, onP
 		return result, errors.New("choose one backup to restore a single conversation")
 	}
 	build := req.All || len(req.Sources) > 0 || len(req.Backups) > 1
-	entries, failures, err := sessions.CollectAvailableBatch(ctx, req.Sources, req.All)
+	collect := sessions.CollectAvailableBatch
+	if onPrepared != nil {
+		collect = sessions.CollectOutgoingBatch
+	}
+	entries, failures, err := collect(ctx, req.Sources, req.All)
 	result.Failed = failures
 	if onPrepared != nil {
 		store.onPrepared = func(id string) error { return onPrepared(id, failures) }
@@ -170,7 +177,11 @@ type batchPublishStats struct {
 func (s batchStore) save(ctx context.Context, entries []sessions.BatchConversation, publish bool, partSize int) (string, batchPublishStats, error) {
 	var stats batchPublishStats
 	device, _ := os.Hostname()
-	manifest := batchManifest{Version: 2, Device: device}
+	origin, err := sessionDeviceID()
+	if err != nil {
+		return "", stats, err
+	}
+	manifest := batchManifest{Version: 2, Device: device, Origin: origin}
 	prepared := make(map[string][]string)
 	staging := ""
 	for _, entry := range entries {
@@ -594,16 +605,8 @@ func (s batchStore) loadEntries(ctx context.Context, id, entry string) ([]sessio
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		var c sessions.BatchConversation
-		if parts, split := manifest.Parts[key]; split {
-			if !validBatchID(key) || len(parts) < 2 {
-				return nil, errors.New("invalid session backup parts")
-			}
-			reader := &batchPartReader{ctx: ctx, store: s, ids: parts}
-			if err := openBatchStream(reader, key, &c); err != nil {
-				return nil, err
-			}
-		} else if err := loadBatchObject(ctx, &s, "conversations", key, &c); err != nil {
+		c, err := s.readEntry(ctx, manifest, key)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -612,6 +615,22 @@ func (s batchStore) loadEntries(ctx context.Context, id, entry string) ([]sessio
 		return nil, errors.New("conversation is missing from this backup")
 	}
 	return out, nil
+}
+
+func (s batchStore) readEntry(ctx context.Context, manifest batchManifest, key string) (sessions.BatchConversation, error) {
+	var c sessions.BatchConversation
+	if parts, split := manifest.Parts[key]; split {
+		if !validBatchID(key) || len(parts) < 2 {
+			return c, errors.New("invalid session backup parts")
+		}
+		reader := &batchPartReader{ctx: ctx, store: s, ids: parts}
+		if err := openBatchStream(reader, key, &c); err != nil {
+			return c, err
+		}
+	} else if err := loadBatchObject(ctx, &s, "conversations", key, &c); err != nil {
+		return c, err
+	}
+	return c, nil
 }
 
 func batchDigest(raw []byte) string {
@@ -641,7 +660,11 @@ func (s batchStore) objectPath(kind, id string) []string {
 }
 
 func (s batchStore) filename(kind, id string) string {
-	return filepath.Join(append([]string{settings.Dir()}, s.objectPath(kind, id)...)...)
+	root := s.localRoot
+	if root == "" {
+		root = settings.Dir()
+	}
+	return filepath.Join(append([]string{root}, s.objectPath(kind, id)...)...)
 }
 
 func (s batchStore) url(kind, id string) string {
@@ -786,6 +809,18 @@ func readVerifiedBatchFile[T any](ctx context.Context, s *batchStore, kind, id s
 	var zero T
 	if !validBatchID(id) {
 		return zero, errors.New("enter a valid session backup ID")
+	}
+	if s.archive != nil {
+		f, err := s.archive.Open(strings.Join(s.objectPath(kind, id), "/"))
+		if err != nil {
+			return zero, err
+		}
+		defer f.Close()
+		raw, err := readBatchLimited(f)
+		if err != nil {
+			return zero, err
+		}
+		return decode(raw)
 	}
 	file := s.filename(kind, id)
 	raw, localErr := readBatchFile(file)

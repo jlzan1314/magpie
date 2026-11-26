@@ -42,10 +42,11 @@ import (
 // The zero value is the default, so a field the user never set follows it
 // and one they set is kept as set.
 type AutoConfig struct {
-	Off   bool   `json:"off,omitempty"`   // turned off by the user; on unless so
-	Hours int    `json:"hours,omitempty"` // between backups; 0 is DefaultHours
-	Keep  int    `json:"keep,omitempty"`  // backups kept of each kind; 0 is DefaultKeep
-	Dir   string `json:"dir,omitempty"`   // the folder; "" is AutoDefaultDir
+	Sessions bool   `json:"sessions,omitempty"`
+	Off      bool   `json:"off,omitempty"`   // turned off by the user; on unless so
+	Hours    int    `json:"hours,omitempty"` // between backups; 0 is DefaultHours
+	Keep     int    `json:"keep,omitempty"`  // backups kept of each kind; 0 is DefaultKeep
+	Dir      string `json:"dir,omitempty"`   // the folder; "" is AutoDefaultDir
 	// SignIns puts the sign-ins (subscription accounts, the plugins'
 	// sign-ins) in each backup too, sealed with Passphrase: the rest of an
 	// automatic backup is plain JSON without credentials. Off unless the
@@ -136,6 +137,9 @@ func SaveAuto(c AutoConfig) error {
 	if c.Dir != "" && !filepath.IsAbs(c.Dir) {
 		return fmt.Errorf("the backup folder must be a full path, not %q", c.Dir)
 	}
+	if c.Sessions && c.Passphrase == "" {
+		return errors.New("set a passphrase for session backups")
+	}
 	if c.SignIns && c.Passphrase == "" {
 		return errors.New("sign-ins go in a backup sealed with a passphrase: set one")
 	}
@@ -146,8 +150,8 @@ func SaveAuto(c AutoConfig) error {
 	if err := os.MkdirAll(settings.Dir(), 0o755); err != nil {
 		return err
 	}
-	autoMu.Lock()
-	defer autoMu.Unlock()
+	autoWork.Lock()
+	defer autoWork.Unlock()
 	autoChecked = time.Time{} // a new folder or interval is looked at anew
 	if err := edit.WriteAtomic(autoPath(), append(data, '\n')); err != nil {
 		return err
@@ -157,13 +161,16 @@ func SaveAuto(c AutoConfig) error {
 
 // AutoBackup is one backup in the folder.
 type AutoBackup struct {
-	Name      string    `json:"name"`
-	Made      time.Time `json:"made"`
-	Reason    string    `json:"reason"`
-	App       string    `json:"app,omitempty"`
-	Size      int64     `json:"size"`
-	Providers int       `json:"providers"`
-	Library   bool      `json:"library"`
+	sessionSHA string
+	Sessions   bool `json:"sessions,omitempty"`
+	sessionID  string
+	Name       string    `json:"name"`
+	Made       time.Time `json:"made"`
+	Reason     string    `json:"reason"`
+	App        string    `json:"app,omitempty"`
+	Size       int64     `json:"size"`
+	Providers  int       `json:"providers"`
+	Library    bool      `json:"library"`
 	// SignIns: the backup has the sign-ins in it, sealed with the
 	// passphrase set when it was made.
 	SignIns bool `json:"signIns,omitempty"`
@@ -175,15 +182,17 @@ type AutoBackup struct {
 // with a hash of the bundle's bytes so a file damaged after it was written
 // is never offered.
 type autoFile struct {
-	Format    string          `json:"format"`
-	Version   int             `json:"version"`
-	Reason    string          `json:"reason"`
-	Made      time.Time       `json:"made"`
-	App       string          `json:"app,omitempty"`
-	Providers int             `json:"providers"`
-	Library   bool            `json:"library"`
-	Sum       string          `json:"sum"`
-	Bundle    json.RawMessage `json:"bundle"`
+	SessionSHA string          `json:"sessionSHA,omitempty"`
+	SessionID  string          `json:"sessionID,omitempty"`
+	Format     string          `json:"format"`
+	Version    int             `json:"version"`
+	Reason     string          `json:"reason"`
+	Made       time.Time       `json:"made"`
+	App        string          `json:"app,omitempty"`
+	Providers  int             `json:"providers"`
+	Library    bool            `json:"library"`
+	Sum        string          `json:"sum"`
+	Bundle     json.RawMessage `json:"bundle"`
 	// SignIns is the sign-ins (provider.SignIns as JSON) sealed with the
 	// passphrase (SealData), never in the clear; SignInsSum tells a
 	// backup's from the next one's without opening them.
@@ -193,8 +202,11 @@ type autoFile struct {
 
 // autoSealed is the sign-ins an automatic backup carries, sealed.
 type autoSealed struct {
-	data []byte
-	sum  string
+	sessionSHA  string
+	sessionID   string
+	sessionTemp string
+	data        []byte
+	sum         string
 }
 
 // autoSignIns seals the sign-ins here for an automatic backup, when c
@@ -231,9 +243,10 @@ const autoTemp = ".magpie-backup-*.tmp"
 var autoRename = os.Rename
 
 var (
-	autoMu      sync.Mutex
-	autoChecked time.Time // when the schedule last looked and found its backup made or not needed
-	autoErr     string    // why the last scheduled backup failed, "" once one goes
+	autoWork    sync.Mutex // serializes local backup creation, pruning and restore
+	autoMu      sync.Mutex // protects the listing cache and last error
+	autoChecked time.Time  // when the schedule last looked and found its backup made or not needed
+	autoErr     string     // why the last scheduled backup failed, "" once one goes
 	// what was read of each file, by name, while its size and time stay
 	autoSeen = map[string]autoSeenFile{}
 )
@@ -268,7 +281,7 @@ func writeAuto(dir, reason string, b Bundle, si autoSealed, now time.Time) (Auto
 	}
 	f := autoFile{Format: autoFormat, Version: 1, Reason: reason, Made: now.UTC(), App: b.App,
 		Providers: len(b.Providers), Library: b.Library != nil, Sum: sum, Bundle: raw,
-		SignIns: si.data, SignInsSum: si.sum}
+		SignIns: si.data, SignInsSum: si.sum, SessionID: si.sessionID, SessionSHA: si.sessionSHA}
 	data, err := json.Marshal(f)
 	if err != nil {
 		return AutoBackup{}, err
@@ -298,17 +311,43 @@ func writeAuto(dir, reason string, b Bundle, si autoSealed, now time.Time) (Auto
 	stamp := now.UTC().Format("20060102-150405")
 	name := "magpie-" + stamp + "-" + reason + ".json"
 	for i := 2; ; i++ { // never over another
-		if _, err := os.Lstat(filepath.Join(dir, name)); errors.Is(err, os.ErrNotExist) {
+		_, setupErr := os.Lstat(filepath.Join(dir, name))
+		_, archiveErr := os.Lstat(sessionArchivePath(dir, name))
+		if errors.Is(setupErr, fs.ErrNotExist) && errors.Is(archiveErr, fs.ErrNotExist) {
 			break
+		}
+		if (setupErr != nil && !errors.Is(setupErr, fs.ErrNotExist)) || (archiveErr != nil && !errors.Is(archiveErr, fs.ErrNotExist)) {
+			os.Remove(tmp.Name())
+			return AutoBackup{}, errors.Join(setupErr, archiveErr)
 		}
 		name = fmt.Sprintf("magpie-%s-%d-%s.json", stamp, i, reason)
 	}
+	if si.sessionTemp != "" {
+		side := sessionArchivePath(dir, name)
+		reservation, e := os.OpenFile(side, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if e != nil {
+			os.Remove(tmp.Name())
+			return AutoBackup{}, e
+		}
+		e = reservation.Close()
+		if e == nil {
+			e = os.Rename(si.sessionTemp, side)
+		}
+		if e != nil {
+			os.Remove(side)
+			os.Remove(tmp.Name())
+			return AutoBackup{}, e
+		}
+	}
 	if err := autoRename(tmp.Name(), filepath.Join(dir, name)); err != nil {
+		if si.sessionTemp != "" {
+			os.Remove(sessionArchivePath(dir, name))
+		}
 		os.Remove(tmp.Name())
 		return AutoBackup{}, err
 	}
 	return AutoBackup{Name: name, Made: f.Made, Reason: reason, App: f.App, Size: int64(len(data)),
-		Providers: f.Providers, Library: f.Library, SignIns: len(si.data) > 0, sum: sum, siSum: si.sum}, nil
+		Providers: f.Providers, Library: f.Library, SignIns: len(si.data) > 0, Sessions: si.sessionID != "", sessionID: si.sessionID, sessionSHA: si.sessionSHA, sum: sum, siSum: si.sum}, nil
 }
 
 // readAuto reads one backup whole, checking its hash.
@@ -329,7 +368,7 @@ func readAuto(path string) (AutoBackup, autoFile, error) {
 		return AutoBackup{}, f, ErrCorrupt
 	}
 	return AutoBackup{Name: filepath.Base(path), Made: f.Made, Reason: f.Reason, App: f.App, Size: int64(len(data)),
-		Providers: f.Providers, Library: f.Library, SignIns: len(f.SignIns) > 0, sum: f.Sum, siSum: f.SignInsSum}, f, nil
+		Providers: f.Providers, Library: f.Library, SignIns: len(f.SignIns) > 0, Sessions: f.SessionID != "", sessionID: f.SessionID, sessionSHA: f.SessionSHA, sum: f.Sum, siSum: f.SignInsSum}, f, nil
 }
 
 // listAuto is the backups in dir, newest first: only files at a backup's
@@ -368,6 +407,8 @@ type autoEntry struct {
 // scanAuto is every file in dir at a backup's name, newest first by its
 // name.
 func scanAuto(dir string) ([]autoEntry, error) {
+	autoMu.Lock()
+	defer autoMu.Unlock()
 	es, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -397,6 +438,10 @@ func scanAuto(dir string) ([]autoEntry, error) {
 				autoSeen[p] = seen
 			}
 			a.b, a.ok = seen.b, seen.ok && seen.b.Reason == a.reason
+			if a.ok && a.b.Sessions {
+				f, err := os.Lstat(sessionArchivePath(dir, a.name))
+				a.ok = err == nil && f.Mode().IsRegular() && f.Size() > 0
+			}
 		}
 		out = append(out, a)
 	}
@@ -441,7 +486,9 @@ func pruneAuto(dir, reason string, keep int, now time.Time) {
 			continue
 		}
 		if good >= keep {
-			os.Remove(filepath.Join(dir, e.name))
+			if os.Remove(filepath.Join(dir, e.name)) == nil && e.b.Sessions {
+				os.Remove(sessionArchivePath(dir, e.name))
+			}
 			continue
 		}
 		if e.ok {
@@ -477,8 +524,12 @@ func autoCollect(app string) (Bundle, error) {
 // changed since the newest scheduled backup. It says the backup made, or
 // nothing. A setup that can't be read whole makes none (Collect's error).
 func AutoTick(now time.Time, app string) (*AutoBackup, error) {
-	autoMu.Lock()
-	defer autoMu.Unlock()
+	return autoTick(context.Background(), now, app)
+}
+
+func autoTick(ctx context.Context, now time.Time, app string) (*AutoBackup, error) {
+	autoWork.Lock()
+	defer autoWork.Unlock()
 	c, err := LoadAuto()
 	if err != nil {
 		return nil, err
@@ -510,11 +561,12 @@ func AutoTick(now time.Time, app string) (*AutoBackup, error) {
 	if err != nil {
 		return nil, err
 	}
-	si, err := autoSignIns(c)
+	si, err := autoContents(ctx, c)
 	if err != nil {
 		return nil, err
 	}
-	if _, sum, err := bundleBytes(b); err == nil && newest != nil && newest.sum == sum && newest.siSum == si.sum {
+	defer si.discard()
+	if _, sum, err := bundleBytes(b); err == nil && newest != nil && newest.sum == sum && newest.siSum == si.sum && newest.sessionID == si.sessionID && previousArchiveUsable(dir, *newest, c.Passphrase) {
 		autoChecked = now // nothing changed: none made, looked at again in an interval
 		return nil, nil
 	}
@@ -529,8 +581,8 @@ func AutoTick(now time.Time, app string) (*AutoBackup, error) {
 
 // AutoNow makes a scheduled backup at once, changed or not (Back up now).
 func AutoNow(app string) (AutoBackup, error) {
-	autoMu.Lock()
-	defer autoMu.Unlock()
+	autoWork.Lock()
+	defer autoWork.Unlock()
 	c, err := LoadAuto()
 	if err != nil {
 		return AutoBackup{}, err
@@ -539,16 +591,20 @@ func AutoNow(app string) (AutoBackup, error) {
 	if err != nil {
 		return AutoBackup{}, err
 	}
-	si, err := autoSignIns(c)
+	si, err := autoContents(context.Background(), c)
 	if err != nil {
 		return AutoBackup{}, err
 	}
+	defer si.discard()
 	now := time.Now()
 	made, err := writeAuto(c.dir(), ReasonAuto, b, si, now)
 	if err != nil {
 		return made, err
 	}
-	autoChecked, autoErr = now, ""
+	autoChecked = now
+	autoMu.Lock()
+	autoErr = ""
+	autoMu.Unlock()
 	pruneAuto(c.dir(), ReasonAuto, c.keep(), now)
 	return made, nil
 }
@@ -560,14 +616,14 @@ func AutoDelete(name string) error {
 	if match == nil {
 		return errors.New("not a backup's name")
 	}
-	autoMu.Lock()
-	defer autoMu.Unlock()
+	autoWork.Lock()
+	defer autoWork.Unlock()
 	c, err := LoadAuto()
 	if err != nil {
 		return err
 	}
 	path := filepath.Join(c.dir(), name)
-	defer delete(autoSeen, path)
+	defer func() { autoMu.Lock(); delete(autoSeen, path); autoMu.Unlock() }()
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -591,6 +647,11 @@ func AutoDelete(name string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if b.Sessions {
+		if err := os.Remove(sessionArchivePath(c.dir(), name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -598,8 +659,8 @@ func AutoDelete(name string) error {
 // What is here now is backed up first (reason restore), so a restore is
 // undone by restoring that one; if it can't be, nothing is put back.
 func AutoRestore(name, app string) (Result, AutoBackup, error) {
-	autoMu.Lock()
-	defer autoMu.Unlock()
+	autoWork.Lock()
+	defer autoWork.Unlock()
 	if !autoName.MatchString(name) {
 		return Result{}, AutoBackup{}, errors.New("not a backup's name")
 	}
@@ -632,10 +693,11 @@ func AutoRestore(name, app string) (Result, AutoBackup, error) {
 		return Result{}, AutoBackup{}, fmt.Errorf("couldn't back up the setup here first, so nothing was put back: %w", err)
 	}
 	now := time.Now()
-	si, err := autoSignIns(c)
+	si, err := autoContents(context.Background(), c)
 	if err != nil {
 		return Result{}, AutoBackup{}, fmt.Errorf("couldn't back up the setup here first, so nothing was put back: %w", err)
 	}
+	defer si.discard()
 	before, err := writeAuto(dir, ReasonRestore, cur, si, now)
 	if err != nil {
 		return Result{}, AutoBackup{}, fmt.Errorf("couldn't back up the setup here first, so nothing was put back: %w", err)
@@ -648,11 +710,12 @@ func AutoRestore(name, app string) (Result, AutoBackup, error) {
 
 // AutoView is what Settings shows.
 type AutoView struct {
-	On     bool   `json:"on"`
-	Hours  int    `json:"hours"`
-	Keep   int    `json:"keep"`
-	Dir    string `json:"dir"`
-	Custom bool   `json:"custom"` // a folder the user picked
+	Sessions bool   `json:"sessions,omitempty"`
+	On       bool   `json:"on"`
+	Hours    int    `json:"hours"`
+	Keep     int    `json:"keep"`
+	Dir      string `json:"dir"`
+	Custom   bool   `json:"custom"` // a folder the user picked
 	// Inside: the folder is in magpie's own, so a wiped disk or a
 	// reinstalled system takes the backups along with what they back up
 	// (two_2025. on Discord: everything is on C:, lost on a reinstall).
@@ -670,15 +733,15 @@ type AutoView struct {
 func AutoStatus() AutoView {
 	c, err := LoadAuto()
 	v := AutoView{On: !c.Off, Hours: int(c.every() / time.Hour), Keep: c.keep(), Dir: c.dir(), Custom: c.Dir != "", Backups: []AutoBackup{},
-		Inside: inside(c.dir(), settings.Dir()), SignIns: c.SignIns, Passphrase: c.Passphrase != ""}
+		Inside: inside(c.dir(), settings.Dir()), Sessions: c.Sessions, SignIns: c.SignIns, Passphrase: c.Passphrase != ""}
 	if err != nil {
 		v.On, v.Error = false, err.Error()
 		return v
 	}
-	autoMu.Lock()
-	defer autoMu.Unlock()
 	if v.On {
+		autoMu.Lock()
 		v.Error = autoErr
+		autoMu.Unlock()
 	}
 	list, err := listAuto(v.Dir)
 	if err != nil && v.Error == "" {
@@ -720,7 +783,7 @@ func RunAuto(ctx context.Context) {
 		case <-t.C:
 		}
 		t.Reset(autoPoll)
-		_, err := AutoTick(time.Now(), "magpie")
+		_, err := autoTick(ctx, time.Now(), "magpie")
 		autoMu.Lock()
 		if msg := fmt.Sprint(err); err != nil && msg != autoErr {
 			log.Printf("backing up by itself: %s", msg)

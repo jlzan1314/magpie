@@ -20,10 +20,11 @@ import (
 )
 
 type SessionBackup struct {
-	ID      string    `json:"id"`
-	Local   bool      `json:"local"`
-	WebDAV  bool      `json:"webdav"`
-	Updated time.Time `json:"updated,omitzero"`
+	remoteTime time.Time // remote collection timestamp, independent of a later local restore
+	ID         string    `json:"id"`
+	Local      bool      `json:"local"`
+	WebDAV     bool      `json:"webdav"`
+	Updated    time.Time `json:"updated,omitzero"`
 }
 
 type SessionBackups struct {
@@ -78,6 +79,9 @@ func listSessionBackups(ctx context.Context, c Config, d *dav) (SessionBackups, 
 		for id, modified := range remote {
 			i := items[id]
 			i.ID, i.WebDAV = id, true
+			if modified.After(i.remoteTime) {
+				i.remoteTime = modified
+			}
 			if modified.After(i.Updated) {
 				i.Updated = modified
 			}

@@ -11,6 +11,9 @@ import (
 )
 
 type sessionSyncState struct {
+	Imported      int                     `json:"imported,omitempty"`
+	ImportError   string                  `json:"importError,omitempty"`
+	ImportedAt    time.Time               `json:"importedAt,omitzero"`
 	Conversations int                     `json:"conversations,omitempty"`
 	Request       SessionRetry            `json:"request,omitzero"`
 	Failed        []sessions.BatchFailure `json:"failed,omitempty"`
@@ -128,15 +131,42 @@ func syncLocalSessionJob(ctx context.Context, requested Config, job *sessionJob,
 }
 
 func shareSessions(ctx context.Context, c Config, st *state) {
-	if !c.Sessions || c.FollowServer || c.S3() || c.GitHub() {
+	if c.S3() || c.GitHub() {
+		return
+	}
+	upload := c.Sessions && !c.FollowServer
+	prefs, prefErr := LoadSessionPreferences()
+	if !upload && !prefs.AutoImport && prefErr == nil {
 		return
 	}
 	job, owner := beginSessionJob(c)
 	if !owner {
 		return
 	}
-	result, err := recordSessionSync(context.WithValue(ctx, sessionJobKey{}, job), c, st, false, SessionRetry{})
-	job.finish(result, err)
+	ctx = context.WithValue(ctx, sessionJobKey{}, job)
+	var result SessionBatchResult
+	var uploadErr error
+	if upload {
+		result, uploadErr = recordSessionSync(ctx, c, st, false, SessionRetry{})
+	}
+	if st.Sessions == nil {
+		st.Sessions = &sessionSyncState{}
+	}
+	importErr := prefErr
+	if prefs.AutoImport && prefErr == nil {
+		updateSessionActivity(ctx, func(a *SessionActivity) { a.Phase = "importing" })
+		n, err := receiveSessionBackups(ctx, c, prefs)
+		importErr = err
+		if n > 0 {
+			st.Sessions.Imported = n
+			st.Sessions.ImportedAt = time.Now()
+		}
+	}
+	st.Sessions.ImportError = ""
+	if importErr != nil {
+		st.Sessions.ImportError = importErr.Error()
+	}
+	job.finish(result, uploadErr)
 }
 
 func recordSessionSync(ctx context.Context, c Config, st *state, explicit bool, retry SessionRetry) (SessionBatchResult, error) {
