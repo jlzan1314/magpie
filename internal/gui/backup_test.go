@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -14,6 +15,15 @@ import (
 	"github.com/yetone/magpie/internal/agentenv"
 	"github.com/yetone/magpie/internal/library"
 )
+
+func TestSessionUploadContinuesAfterSettingsCloses(t *testing.T) {
+	settingsPage, closePage := context.WithCancel(context.Background())
+	ctx := sessionUploadContext(settingsPage)
+	closePage()
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("closing Settings ended the upload: %v", err)
+	}
+}
 
 // folderOnly is the app's windows as far as an export needs them.
 type folderOnly struct{ Windows }

@@ -780,10 +780,10 @@ var mu sync.Mutex
 
 // Now syncs once; nothing when sync is off. Usage is shared at most every
 // usageEvery.
-func Now(ctx context.Context) error { return syncNow(ctx, false, "") }
+func Now(ctx context.Context) error { return syncNow(ctx, ctx, false, "") }
 
 // SyncNow is Now asked for: usage is shared whatever the time.
-func SyncNow(ctx context.Context) error { return syncNow(ctx, true, "") }
+func SyncNow(ctx context.Context) error { return syncNow(ctx, ctx, true, "") }
 
 // SyncPreviewed is SyncNow for what Preview told, its Token: when the
 // sync would now do anything else, nothing is done, and it is
@@ -792,10 +792,10 @@ func SyncPreviewed(ctx context.Context, token string) error {
 	if token == "" {
 		return errors.New("no preview to sync")
 	}
-	return syncNow(ctx, true, token)
+	return syncNow(ctx, ctx, true, token)
 }
 
-func syncNow(ctx context.Context, force bool, expect string) error {
+func syncNow(ctx, sessionCtx context.Context, force bool, expect string) error {
 	if _, ok := Load(); !ok { // off: no lock taken, so none made
 		return nil
 	}
@@ -843,7 +843,7 @@ func syncNow(ctx context.Context, force bool, expect string) error {
 	} else {
 		st.Last = time.Now()
 		shareUsage(ctx, c, &st, force)
-		shareSessions(ctx, c, &st)
+		shareSessions(sessionCtx, c, &st)
 	}
 	saveState(st)
 	return err
@@ -853,8 +853,9 @@ func syncNow(ctx context.Context, force bool, expect string) error {
 // and didn't say for how long; one that says is waited for as long as it
 // asks, up to limitWait.
 const (
-	maxWait   = 30 * time.Minute
-	limitWait = 6 * time.Hour
+	maxWait           = 30 * time.Minute
+	limitWait         = 6 * time.Hour
+	sessionSyncBudget = 6 * time.Hour
 )
 
 // backoff is how long Run waits after a sync that ended with err, the last
@@ -913,11 +914,13 @@ func run(ctx context.Context, first time.Duration) {
 		if !tried.IsZero() && time.Since(tried) < w {
 			continue
 		}
-		// no request is let stand still for long (stallAfter), but a large
-		// backup on a slow line takes what it takes: only an hour ends it
+		// Each phase has its own deadline. A slower session upload can
+		// continue after the setup deadline and still stops with the gateway.
 		c, cancel := context.WithTimeout(ctx, time.Hour)
-		err := Now(c)
+		sessionCtx, cancelSessions := context.WithTimeout(ctx, sessionSyncBudget)
+		err := syncNow(c, sessionCtx, false, "")
 		cancel()
+		cancelSessions()
 		tried = time.Now()
 		if msg := fmt.Sprint(err); err != nil && msg != last {
 			log.Printf("syncing through %s: %s", cfg.Kind(), msg)

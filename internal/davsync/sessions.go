@@ -43,6 +43,7 @@ type SessionTransfer struct {
 // TransferCodexSession explicitly sends or receives one native session using
 // the current WebDAV account. It is separate from both setup sync and its timer.
 func TransferCodexSession(ctx context.Context, action, id string) (SessionTransfer, error) {
+	ctx = withSessionDAVTimeouts(ctx)
 	id = strings.ToLower(strings.TrimSpace(id))
 	if !sessions.ValidCodexSyncID(id) {
 		return SessionTransfer{}, errors.New("enter a Codex session ID (UUID)")

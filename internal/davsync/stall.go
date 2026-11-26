@@ -26,6 +26,24 @@ var (
 	metaLimit  = 30 * time.Second
 )
 
+const (
+	sessionStallAfter = 5 * time.Minute
+	sessionMetaLimit  = 2 * time.Minute
+)
+
+type sessionDAVKey struct{}
+
+func withSessionDAVTimeouts(ctx context.Context) context.Context {
+	return context.WithValue(ctx, sessionDAVKey{}, true)
+}
+
+func requestTimeouts(ctx context.Context) (stall, metadata time.Duration) {
+	if ctx.Value(sessionDAVKey{}) == true {
+		return sessionStallAfter, sessionMetaLimit
+	}
+	return stallAfter, metaLimit
+}
+
 // errStalled is what a request ended for having moved nothing in time.
 type errStalled struct {
 	method string
@@ -73,9 +91,9 @@ func (t stallTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 	moving := req.Method == http.MethodGet || req.Method == http.MethodPut || bigBody(req)
-	after := metaLimit
+	stall, after := requestTimeouts(req.Context())
 	if moving {
-		after = stallAfter
+		after = stall
 	}
 	ctx, cancel := context.WithCancelCause(req.Context())
 	w := &watch{after: after, moving: moving, start: time.Now()}

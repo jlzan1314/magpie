@@ -31,6 +31,16 @@ func shortStall(t *testing.T, stall, meta time.Duration) {
 	t.Cleanup(func() { stallAfter, metaLimit = s, m })
 }
 
+func TestSessionDAVTimeouts(t *testing.T) {
+	ctx := context.Background()
+	if transfer, metadata := requestTimeouts(ctx); transfer != stallAfter || metadata != metaLimit {
+		t.Fatalf("default timeouts: transfer %s, metadata %s", transfer, metadata)
+	}
+	if transfer, metadata := requestTimeouts(withSessionDAVTimeouts(ctx)); transfer != 5*time.Minute || metadata != 2*time.Minute {
+		t.Fatalf("session timeouts: transfer %s, metadata %s", transfer, metadata)
+	}
+}
+
 // slowDAV is a WebDAV server on a slow line: the backup goes both ways in
 // chunks of chunk bytes every gap, or stops after stopAt bytes for good. A
 // PUT is answered tail after its body is all in: the time the last of it,
