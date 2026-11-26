@@ -589,22 +589,118 @@ window.askPreviewRows = function (at, v, sub) {
 
 function sessionTransferRows(at, v, row) {
   const cards = [
-    ["Batch session backup and import", "Merge selected conversations, back them up, and import into the agents you choose.", () => window.sessionBatchForm(!!v.followServer)],
-    ["Codex session transfer", "Transfer one compressed and encrypted conversation by ID.", () => window.codexSessionForm(!!v.followServer)],
+    ["Batch session backup and import", "Merge selected conversations, back them up, and import into the agents you choose.", window.sessionBatchForm],
+    ["Codex session transfer", "Transfer one compressed and encrypted conversation by ID.", window.codexSessionForm],
   ];
   for (const [index, [title, subtitle, form]] of cards.entries()) {
     const button = el("button", "text", t("Open"));
     const panel = el("div");
     button.type = "button";
+    let tracker;
     button.onclick = () => {
       if (panel.firstChild) panel.replaceChildren();
-      else panel.append(form());
+      else panel.append(form(!!v.followServer, tracker));
       button.textContent = t(panel.firstChild ? "Close" : "Open");
     };
     const heading = row(t(title), t(subtitle), button, "sync-session-row");
-    if (index === 0 && v.sessionsError) showBatchFailure(heading.querySelector(".who"), v.sessionsError);
+    if (index === 0) {
+      tracker = sessionActivityLine(heading.querySelector(".who"), v, id => {
+        if (!panel.firstChild) button.click();
+        panel.firstChild.useSessionBackup(id);
+      });
+    }
     at.append(panel);
   }
+}
+
+function sessionActivityLine(at, initial, restore) {
+  const note = el("div", "sub wraps say");
+  note.setAttribute("role", "status");
+  const last = el("button", "text");
+  const retry = el("button", "text", t("Retry now"));
+  const failures = el("details", "session-backup-failures");
+  const failedSummary = el("summary");
+  const failedList = el("div", "stack");
+  failures.append(failedSummary, failedList);
+  failures.hidden = true;
+  last.hidden = retry.hidden = true;
+  at.append(note, last, retry, failures);
+  let timer, notifyForm, revision = 0, previousFailures = "", active = false;
+  const paint = a => {
+    active = ["preparing", "uploading", "waiting"].includes(a.phase);
+    notifyForm?.();
+    const bad = a.error || "";
+    const remaining = Math.max(0, Math.ceil((Date.parse(a.retryAt) - Date.now()) / 1000));
+    let words = "";
+    if (a.phase === "preparing") words = t("Preparing session backup…");
+    else if (a.phase === "waiting") words = t("Waiting to retry in {n} s", { n: remaining });
+    else if (a.phase === "uploading") words = t("Verified {done} of {count} files · {size} of {total}", { done: a.objects, count: a.count, size: fmtBytes(a.bytes), total: fmtBytes(a.total) });
+    else if (bad) words = tNotice(bad);
+    else if (a.phase === "pending") words = t("Session backup upload was interrupted. The next sync will resume it.");
+    else if (a.phase === "partial") words = t("{n} conversations backed up", { n: a.conversations });
+    else if (a.phase === "done" && a.skipped && !a.uploaded) words = t("Remote files match packed size · skipped {skipped}", { skipped: a.skipped });
+    else if (a.phase === "done") words = t("{n} conversations backed up", { n: a.conversations });
+    if (a.phase === "uploading" && a.sending > 0)
+      words += " · " + t("Sending {size}", { size: fmtBytes(a.sending) });
+    if (note.textContent !== words) note.textContent = words;
+    note.hidden = !words;
+    note.classList.toggle("bad", !!bad && !active && a.phase !== "pending");
+    note.classList.toggle("session-batch-error", !!bad && !active);
+    last.hidden = !a.latest;
+    if (a.latest) {
+      last.textContent = t("Last verified backup · {when}", { when: new Date(a.last).toLocaleString() });
+      last.onclick = () => restore(a.latest);
+    }
+    retry.hidden = initial.followServer || !(a.canRetry || a.phase === "failed" || a.phase === "pending");
+    retry.onclick = () => start({ now: true });
+    const items = active ? [] : a.failed || [];
+    const key = JSON.stringify(items);
+    if (key !== previousFailures) {
+      previousFailures = key;
+      failures.hidden = !items.length;
+      failedSummary.textContent = t("{n} sessions to retry", { n: items.length });
+      failedList.replaceChildren(...items.map(f => {
+        const line = el("div", "sub wraps", (f.title || f.source.id) + " · " + tNotice(f.error));
+        const again = el("button", "text", t("Retry"));
+        again.type = "button";
+        again.onclick = () => start({ source: f.source });
+        if (!initial.followServer) line.append(again);
+        return line;
+      }));
+    }
+  };
+  const schedule = () => {
+    clearTimeout(timer);
+    if (at.isConnected) timer = setTimeout(poll, active ? 1000 : 15000);
+  };
+  const poll = async () => {
+    if (!at.isConnected) return;
+    if (document.hidden || !at.getClientRects().length) {
+      schedule();
+      return;
+    }
+    const turn = revision;
+    try {
+      const a = await api("davsync?view=session-activity");
+      if (revision === turn) paint(a);
+    } catch (err) {
+      if (revision === turn) {
+        note.hidden = false;
+        note.textContent = tNotice(err.message);
+      }
+    } finally { schedule(); }
+  };
+  const start = async body => {
+    const turn = ++revision;
+    try {
+      const a = await api("davsync/session-sync-start", body);
+      if (turn === revision) paint(a);
+    } catch (err) { statusErr(err); }
+    finally { schedule(); }
+  };
+  paint({ phase: "idle", error: initial.sessionsError });
+  timer = setTimeout(poll, 0);
+  return { start, get busy() { return active; }, onChange(fn) { notifyForm = fn; } };
 }
 
 window.codexSessionForm = function (followsServer) {
@@ -665,7 +761,7 @@ async function rememberSessionPreferences(prefs) {
 
 const sessionRefKey = ({ agent, id, wsl }) => JSON.stringify([agent, id, wsl || ""]);
 
-window.sessionBatchForm = function (followsServer) {
+window.sessionBatchForm = function (followsServer, tracker) {
   const draftAtOpen = sessionPrefsDraft;
   const form = el("div", "editor sync-form session-batch-form");
   const sourceList = el("div", "session-batch-sources");
@@ -712,12 +808,29 @@ window.sessionBatchForm = function (followsServer) {
   const actions = el("div", "bar");
   if (!followsServer) actions.append(syncChanges);
   actions.append(backup, distribute);
-  const manager = sessionBackupManager(id => {
-    back.value = [back.value.trim(), id].filter(Boolean).join("\n");
+  let entry = "", entryTitle = "", pendingRestore;
+  const selection = el("div", "hint");
+  const backupField = field(t("Existing backup IDs"), back);
+  backupField[1].append(selection);
+  const chooseBackup = (id, choice) => {
+    if (!loaded) {
+      pendingRestore = [id, choice];
+      return;
+    }
+    back.value = id;
+    all.input.checked = false;
+    for (const c of choices) c.input.checked = false;
+    entry = choice?.id || "";
+    entryTitle = choice?.title || "";
     changed();
-  });
+    destinations.querySelector("input")?.focus(NO_SCROLL);
+  };
+  form.useSessionBackup = chooseBackup;
+  back.oninput = () => { entry = entryTitle = ""; };
+  const manager = sessionBackupManager(chooseBackup);
+  manager.open = followsServer;
   form.append(...field(t("Sessions"), sources),
-    ...field(t("Existing backup IDs"), back),
+    ...backupField,
     ...field(t("Import into agents"), destinations),
     ...field(t("Target project folder"), cwd),
     manager, actions, output);
@@ -734,16 +847,20 @@ window.sessionBatchForm = function (followsServer) {
       sources: chosen(),
       sourceAgent,
       search: search.value,
-      backupIDs: back.value,
+      backupIDs: back.value, entry, entryTitle,
       targets: chosenTargets(),
       cwd: cwd.value,
     });
   }
   function update() {
+    if (entry && (all.input.checked || choices.some(c => c.input.checked))) entry = entryTitle = "";
+    selection.textContent = entryTitle || entry;
+    selection.hidden = !entry;
     const ready = loaded && (ids().length !== 0 || selectingAll() || choices.some(c => c.input.checked));
     backup.disabled = working || !ready;
+    distribute.textContent = ids().length && !selectingAll() && !chosen().length ? t("Import") : t("Back up and import");
     distribute.disabled = working || !ready || targets.every(c => !c.input.checked);
-    syncChanges.disabled = working || choices.length === 0;
+    syncChanges.disabled = working || tracker.busy || choices.length === 0;
     sourceList.hidden = all.input.checked && (!loaded || choices.length !== 0);
     all.input.disabled = !loaded || !choices.length;
     agentPick.disabled = !loaded || all.input.checked || sourceAgents.length === 0;
@@ -756,6 +873,7 @@ window.sessionBatchForm = function (followsServer) {
       c.label.hidden = !c.text.includes(needle) || (sourceAgent && c.ref.agent !== sourceAgent);
     }
   }
+  tracker.onChange(() => { if (form.isConnected) update(); });
   form.addEventListener("input", changed);
   search.addEventListener("input", filter);
   update();
@@ -766,6 +884,8 @@ window.sessionBatchForm = function (followsServer) {
     all.input.checked = prefs.all !== false;
     search.value = prefs.search || "";
     back.value = prefs.backupIDs || "";
+    entry = prefs.entry || "";
+    entryTitle = prefs.entryTitle || "";
     cwd.value = prefs.cwd || "";
     const selected = new Set((prefs.sources || []).map(sessionRefKey));
     choices = r.sources.map(({ agent, id, wsl, title, cwd }) => {
@@ -782,6 +902,7 @@ window.sessionBatchForm = function (followsServer) {
     sourceAgent = sourceAgents.includes(prefs.sourceAgent) ? prefs.sourceAgent : "";
     paintAgent();
     if (!choices.length) {
+      manager.open = true;
       sourceList.append(el("div", "sub", t("No readable sessions found")));
     }
     targets = r.targets.map(agent => {
@@ -792,6 +913,7 @@ window.sessionBatchForm = function (followsServer) {
     });
     destinations.append(...targets.map(c => c.label));
     loaded = true;
+    if (pendingRestore) chooseBackup(...pendingRestore);
     filter();
     update();
     if (r.preferencesError) showBatchFailure(output, r.preferencesError);
@@ -802,6 +924,7 @@ window.sessionBatchForm = function (followsServer) {
       all: selectingAll(),
       sources: selectingAll() ? [] : chosen(),
       backups: ids(),
+      entry,
       targets: importing ? chosenTargets() : [],
       cwd: importing ? cwd.value.trim() : "",
     };
@@ -817,7 +940,7 @@ window.sessionBatchForm = function (followsServer) {
       output.textContent = t("Working…");
       const result = await api("davsync/session-batch", req);
       output.replaceChildren();
-      showBatchResult(output, result);
+      showBatchResult(output, result, req);
     } catch (err) {
       output.replaceChildren();
       showBatchFailure(output, err.message);
@@ -838,9 +961,8 @@ window.sessionBatchForm = function (followsServer) {
         t("The selected conversations may include private source code, prompts and tool output. Each backup is encrypted."),
         t("Sync local changes"))) return;
       output.textContent = t("Working…");
-      const result = await api("davsync/session-sync", {});
+      await tracker.start({});
       output.replaceChildren();
-      showBatchResult(output, result);
     } catch (err) {
       output.replaceChildren();
       showBatchFailure(output, err.message);
@@ -862,7 +984,7 @@ function showBatchFailure(out, error) {
   out.append(el("div", "sub bad wraps session-batch-error", t(error)));
 }
 
-function showBatchResult(out, r) {
+function showBatchResult(out, r, request) {
   if (r.backup) {
     const line = el("div", "session-batch-backup");
     const code = el("code", "", r.backup);
@@ -896,6 +1018,25 @@ function showBatchResult(out, r) {
     line.append(resume);
     out.append(line);
   }
+  for (const f of r.failed || []) {
+    const line = el("div", "sub wraps", (f.title || f.source.id) + " · " + tNotice(f.error));
+    const retry = el("button", "text", t("Retry"));
+    retry.type = "button";
+    retry.onclick = async () => {
+      retry.disabled = true;
+      const single = { sources: [f.source], targets: request?.targets || [], cwd: request?.cwd || "" };
+      try {
+        const result = await api("davsync/session-batch", single);
+        line.replaceChildren();
+        showBatchResult(line, result, single);
+      } catch (err) {
+        retry.disabled = false;
+        statusErr(err);
+      }
+    };
+    line.append(retry);
+    out.append(line);
+  }
   if (r.failure) showBatchFailure(out, r.failure);
 }
 
@@ -906,7 +1047,7 @@ function sessionBackupManager(use) {
   refresh.type = "button";
   const body = el("div", "stack");
   body.append(el("div", "bar", refresh), list);
-  box.append(el("summary", "", t("Manage session backups")), body);
+  box.append(el("summary", "", t("Recoverable backups")), body);
 
   async function remove(id, scope) {
     const where = scope === "local" ? t("Delete local backup") : t("Delete WebDAV backup");
@@ -921,21 +1062,61 @@ function sessionBackupManager(use) {
     }
   }
 
-  async function load() {
+  let offset = 0, generation = 0;
+  const shown = new Set();
+  const more = el("button", "text", t("Show more"));
+  more.hidden = true;
+  box.lastElementChild.append(more);
+  more.onclick = () => load(true);
+  async function load(append = false) {
+    const turn = ++generation;
+    if (append !== true) {
+      offset = 0;
+      shown.clear();
+    }
+    more.disabled = true;
     refresh.disabled = true;
-    list.replaceChildren(el("div", "", t("Working…")));
+    if (!offset) list.replaceChildren(el("div", "", t("Working…")));
     try {
-      const state = await api("davsync/session-backups", {});
-      list.replaceChildren();
+      const state = await api("davsync/session-restore-choices", { offset });
+      if (turn !== generation) return;
+      if (!offset) list.replaceChildren();
+      offset += state.items.length;
+      more.hidden = !state.more;
       if (!state.items.length) list.append(el("div", "", t("No session backups")));
       for (const item of state.items) {
+        if (shown.has(item.id)) continue;
+        shown.add(item.id);
         const row = el("div", "session-batch-backup");
-        row.append(el("code", "", item.id));
+        const titles = (item.entries || []).map(e => e.title).filter(Boolean);
+        row.append(el("span", "", [item.device, titles.slice(0, 2).join(" · ")].filter(Boolean).join(" · ") || item.id));
+        if (item.problem) showBatchFailure(row, item.problem);
+        if (item.ready && !item.remoteReady) row.append(el("span", "hint", t("Local backup")));
         if (item.updated) row.append(el("span", "", new Date(item.updated).toLocaleString()));
         const pick = el("button", "text", t("Use backup"));
         pick.type = "button";
         pick.onclick = () => use(item.id);
-        row.append(pick);
+        if (item.ready) row.append(pick);
+        if (item.ready && item.entries?.length) {
+          const choices = el("details", "more");
+          choices.append(el("summary", "", t("Choose a conversation")));
+          const stack = el("div", "stack");
+          const search = input("", t("Filter sessions"));
+          search.setAttribute("aria-label", t("Filter sessions"));
+          search.oninput = () => {
+            const needle = search.value.trim().toLocaleLowerCase();
+            for (const b of stack.children) b.hidden = !b.textContent.toLocaleLowerCase().includes(needle);
+          };
+          if (item.entries.length > 1) choices.append(search);
+          for (const choice of item.entries) {
+            const button = el("button", "text", choice.title || choice.id);
+            button.onclick = () => use(item.id, choice);
+            stack.append(button);
+          }
+          choices.append(stack);
+          row.append(choices);
+        }
+        if (!item.ready) row.append(el("span", "hint", t("Incomplete backup")));
         if (item.local) {
           const local = el("button", "text", t("Delete local backup"));
           local.type = "button";
@@ -952,10 +1133,12 @@ function sessionBackupManager(use) {
       }
       if (state.webdavError) showBatchFailure(list, state.webdavError);
     } catch (e) {
-      list.replaceChildren();
-      showBatchFailure(list, e.message);
+      if (turn === generation) {
+        if (!offset) list.replaceChildren();
+        showBatchFailure(list, e.message);
+      }
     } finally {
-      refresh.disabled = false;
+      if (turn === generation) refresh.disabled = more.disabled = false;
     }
   }
 

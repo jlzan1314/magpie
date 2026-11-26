@@ -58,6 +58,7 @@ function serve(lang, posts) {
     fx: { rate: 7.2, stale: false },
   };
   let sync = { ...base, sessionsError: longSessionError };
+  let activity = {phase:"idle",error:longSessionError};
   let tokens = 0, previewed = 0, undos = 0, sessionPrefs = { all: true };
   return async (route) => {
     const request = route.request();
@@ -71,7 +72,7 @@ function serve(lang, posts) {
     if (pathname === "/api/usage/quotas") return json([]);
     if (pathname === "/api/groups") return json({ groups: [], models: [] });
     if (pathname === "/api/plugins") return json({ plugins: [] });
-    if (pathname === "/api/davsync") return json(sync);
+    if (pathname === "/api/davsync") return json(new URL(request.url()).searchParams.get("view") === "session-activity" ? activity : sync);
     if (pathname === "/api/davsync/session-candidates") return json({
       sources: [
         { agent: "codex", id: "sample", title: "Long title ".repeat(18), cwd: "/project/" + "directory".repeat(28) },
@@ -84,10 +85,13 @@ function serve(lang, posts) {
       sessionPrefs = post();
       return route.fulfill({ status: 204 });
     }
-    if (pathname === "/api/davsync/session-sync") {
+    if (pathname === "/api/davsync/session-sync-start") {
       post();
-      return json({backup:"example", remote:true, conversations:1, uploaded:0, skipped:2});
+      activity=activity.phase==="waiting" ? {phase:"done",latest:"example",last:minAgo,conversations:1,uploaded:0,skipped:2} : {phase:"waiting",retryAt:new Date(Date.now()+30000).toISOString(),canRetry:true};
+      return json(activity);
     }
+    if (pathname === "/api/davsync/session-restore-choices") return json({items:[{id:"snapshot",ready:true,remoteReady:true,webdav:true,device:"Laptop",updated:minAgo,entries:[{id:"thread",title:"Restore fixture"}]}]});
+    if (pathname === "/api/davsync/session-batch") {post();return json({conversations:1});}
     if (pathname === "/api/davsync/save") {
       const b = post();
       sync = { ...sync };
@@ -239,7 +243,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await undoRow.waitFor({ state: "detached" });
         assert.equal(await list.locator(".sync-preview-row").count(), 1, "Preview a sync gone after the undo");
         const batch = list.locator(".sync-session-row", { hasText: w("Batch session backup and import") });
-        await click(batch.getByRole("button"));
+        await click(batch.getByRole("button",{name:w("Open"),exact:true}));
         const panel = list.locator(".session-batch-form");
         const sessions = panel.locator(".session-batch-sources .session-batch-choice");
         const allSessions = panel.getByRole("checkbox", { name: w("All readable sessions") });
@@ -276,8 +280,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await click(panel.getByRole("button",{name:w("Sync local changes"),exact:true}));
         const confirm = page.getByRole("alertdialog").getByRole("button",{name:w("Sync local changes"),exact:true});
         await confirm.click();
-        await panel.getByText(w("Remote files match packed size · skipped {skipped}",{skipped:2}),{exact:true}).waitFor();
-        assert.equal(all("/api/davsync/session-sync").length,1);
+        await batch.getByRole("button",{name:w("Retry now"),exact:true}).waitFor();
+        await click(batch.getByRole("button", {name:w("Close"),exact:true}));
+        await page.goto("http://magpie.test/?view=settings&tab=sync");
+        await batch.waitFor({state:"visible"});
+        await batch.getByRole("button", {name:w("Retry now"),exact:true}).waitFor();
+        assert.equal(all("/api/davsync/session-sync-start").length, 1, "reopening attached to the running job");
+        await click(batch.getByRole("button", {name:w("Retry now"),exact:true}));
+        await click(batch.getByRole("button",{name:w("Open"),exact:true}));
+        await batch.getByText(w("Remote files match packed size · skipped {skipped}",{skipped:2}),{exact:true}).waitFor();
+        assert.equal(all("/api/davsync/session-sync-start").length,2);
 
         await sessions.filter({ visible: true }).getByRole("checkbox").check();
         await search.fill("Long title");
@@ -288,12 +300,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           response.request().postDataJSON()?.cwd === "/fixture/project");
         await panel.getByRole("textbox", { name: w("Target project folder") }).fill("/fixture/project");
         await savedDraft;
-        await page.reload();
-        if (!await list.isVisible()) {
-          await page.locator("#prefs").click();
-          await openPart(page, "sync");
-        }
-        await click(batch.getByRole("button"));
+        await page.goto("http://magpie.test/?view=settings&tab=sync");
+        await batch.waitFor({state:"visible"});
+        await click(batch.getByRole("button",{name:w("Open"),exact:true}));
         await panel.getByRole("textbox", { name: w("Target project folder") }).waitFor();
         await page.waitForFunction(() =>
           [...document.querySelectorAll(".session-batch-form input")].some(input => input.value === "/fixture/project"));
@@ -304,7 +313,18 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.ok(await sessions.filter({ visible: true }).getByRole("checkbox").isChecked());
         assert.equal(await panel.getByRole("textbox", { name: w("Existing backup IDs") }).inputValue(), "example");
         assert.ok(await panel.getByRole("group", { name: w("Import into agents") }).getByRole("checkbox", { name: "Codex" }).isChecked());
-        assert.equal(all("/api/davsync/session-sync").length, 1, "editing a draft did not start a transfer");
+        assert.equal(all("/api/davsync/session-sync-start").length, 2, "editing a draft did not start a transfer");
+        const manager=panel.locator(".session-batch-manager");
+        await click(manager.locator("summary").first());
+        await manager.getByText("Laptop · Restore fixture").waitFor();
+        await click(manager.getByText(w("Choose a conversation"),{exact:true}));
+        await click(manager.getByRole("button",{name:"Restore fixture",exact:true}));
+        await click(panel.getByRole("button",{name:w("Import"),exact:true}));
+        const restore = await waitPosts("/api/davsync/session-batch",1);
+        assert.deepEqual(restore.backups,["snapshot"]);
+        assert.equal(restore.entry,"thread");
+        assert.equal(restore.all,false);
+        assert.deepEqual(restore.sources,[]);
         assert.deepEqual(errors, []);
       });
     }

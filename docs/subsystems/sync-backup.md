@@ -274,7 +274,7 @@ reasoning are outside the portable records.
 backup first. Each merged conversation is gzipped and encrypted with the
 existing sync passphrase. A manifest gives the backup its ID. There is no
 fixed size limit on a transcript. Large
-gzip streams span multiple encrypted objects, each under the 64 MiB
+gzip streams are split into 8 MiB parts for new snapshots, each under the 64 MiB
 transport limit. A version 3 manifest records their order and content
 hashes. This format requires an updated reader. The reader also accepts
 earlier manifests. For a two-way WebDAV
@@ -283,11 +283,11 @@ New backups use `magpie/sessions/<backup-id>/` on WebDAV. The encrypted
 files use the `session_` prefix, with a separate object for each
 conversation or part. Existing WebDAV backups are read from their original
 collections. Interrupted uploads continue in their original collection.
-Magpie compares the sealed file length at
-its content-addressed destination using WebDAV metadata. A match skips the
-file body. A new backup can reuse an unchanged conversation from the last
-published backup using a server-side COPY. Servers without COPY receive a
-normal upload. New uploads are read back and verified. Each backup owns its
+Magpie skips an object when its size and strong WebDAV ETag match a
+local receipt from a previously authenticated read of that object. It
+reads and verifies objects without a matching receipt. This also handles
+a lost PUT response. A server-side COPY into a new snapshot is verified
+at its destination. Servers without COPY receive a normal upload. Each backup owns its
 files and can be removed independently.
 
 The WebDAV advanced setting for sessions enables periodic backup of readable
@@ -303,13 +303,27 @@ separate six-hour budget and can resume if interrupted. For mutable native Codex
 sessions the shortcut also checks the local transcript fingerprint and the
 strong ETag of the last verified remote copy, preserving fork detection.
 
-**Manage session backups** lists the local and WebDAV copies and lets you
-delete either copy explicitly. WebDAV deletion is available to computers
-that sync both ways. It removes the backup from the server for every
-device; another device can still have a local copy. Deleting a backup
-leaves native Agent sessions intact. Earlier v1 manifests remain readable
-and can be deleted, while their shared conversation objects are kept for
-other v1 manifests.
+The Sync page starts an all-sessions sync in the background and shows
+verified bytes and objects, bytes sent for the current file, and the last
+verified backup. Reopening the page attaches to the running task. Transient
+network errors back off for 2, 4, 8 and 16 seconds; a longer Retry-After
+takes precedence. Retry now can wake a local backoff. A prepared explicit
+upload is recovered at startup even on a manual schedule.
+
+A source that cannot be read, or a conversation object rejected by the
+server, is reported with its title and source. A partial remote snapshot
+has its own manifest containing only the successful entries. Retrying a
+failed source merges it with the previously backed-up conversations.
+Connection-wide failures keep the prepared snapshot for the next run.
+
+**Recoverable backups** pages through local and WebDAV snapshots by date.
+Before offering a restore, it authenticates the manifest and checks that
+the referenced files exist. Import verifies their contents. New encrypted
+manifests include the source hostname and conversation titles; older
+manifests remain usable. Choose a snapshot or one conversation, select a
+target Agent and import. Picking a backup clears the live source selection.
+The picker also allows deleting a local or remote backup. WebDAV deletion
+requires two-way sync. V1 shared objects remain after deleting a V1 manifest.
 
 Native import runs after backup, into the chosen Codex and Claude Code
 stores in parallel. Each target returns its new session ID and resume

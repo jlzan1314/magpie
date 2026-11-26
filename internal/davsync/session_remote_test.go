@@ -368,8 +368,8 @@ func TestSessionBatchSkipAndLocalChangeSync(t *testing.T) {
 		t.Fatalf("incremental batch = %+v, %v", second, err)
 	}
 	davSrv.mu.Lock()
-	if davSrv.puts != 5 || davSrv.gets != 5 {
-		t.Fatalf("incremental batch expected puts=5 gets=5, got puts=%d gets=%d", davSrv.puts, davSrv.gets)
+	if davSrv.puts != 5 || davSrv.gets != 6 {
+		t.Fatalf("incremental batch expected puts=5 gets=6, got puts=%d gets=%d", davSrv.puts, davSrv.gets)
 	}
 	davSrv.mu.Unlock()
 
@@ -479,7 +479,7 @@ func TestSessionBatchParts(t *testing.T) {
 
 	s.batchID = id
 	var manifest batchManifest
-	if err := s.loadObject(ctx, "backups", id, &manifest); err != nil {
+	if err := loadBatchObject(ctx, &s, "backups", id, &manifest); err != nil {
 		t.Fatal(err)
 	}
 	parts := manifest.Parts[manifest.Entries[0]]
@@ -587,8 +587,8 @@ func TestSessionSyncResumesPreparedBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := batchStore{dav: d, passphrase: cfg.Passphrase, remoteDir: batchDir, onPrepared: func(backup string) {
-		saveState(state{Key: stateKey(cfg), Sessions: &sessionSyncState{Pending: backup}})
+	store := batchStore{dav: d, passphrase: cfg.Passphrase, remoteDir: batchDir, onPrepared: func(backup string) error {
+		return saveState(state{Key: stateKey(cfg), Sessions: &sessionSyncState{Pending: backup}})
 	}}
 	entries := []sessions.BatchConversation{
 		{Sources: []sessions.BatchSource{{Agent: "codex", ID: "one"}}, Parts: []sessions.Part{{Role: "user", Kind: "text", Text: "first"}}},

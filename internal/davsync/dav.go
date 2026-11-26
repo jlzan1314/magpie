@@ -203,6 +203,13 @@ func (d *dav) send(ctx context.Context, method, u string, body []byte, h map[str
 	if err != nil {
 		return nil, err
 	}
+	if ctx.Value(sessionDAVKey{}) == true {
+		switch res.StatusCode {
+		case http.StatusRequestTimeout, http.StatusInternalServerError, http.StatusBadGateway, http.StatusGatewayTimeout:
+			res.Body.Close()
+			return nil, &temporarySessionHTTP{res.Status}
+		}
+	}
 	if res.StatusCode == http.StatusUnauthorized {
 		res.Body.Close()
 		return nil, errLogin
