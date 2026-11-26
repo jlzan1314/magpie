@@ -252,7 +252,8 @@ it does, and take it back.
 
 In **Settings → Sync and backup → Batch session backup and import**, select
 individual sessions or **All readable sessions**. The picker uses the same
-native transcript readers and session access choices as Sessions. A
+native transcript readers and session access choices as Sessions. Search
+the list or use the source Agent menu to narrow the selection. A
 conversation from an unavailable reader cannot be selected. A blank
 conversation is skipped when selecting all. Enter existing backup IDs to
 merge earlier snapshots with the selection, and choose one or more import
