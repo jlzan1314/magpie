@@ -8,12 +8,16 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/agentenv"
+	"github.com/yetone/magpie/internal/davsync"
 	"github.com/yetone/magpie/internal/library"
+	"github.com/yetone/magpie/internal/sessions"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 func TestSessionUploadContinuesAfterSettingsCloses(t *testing.T) {
@@ -22,6 +26,54 @@ func TestSessionUploadContinuesAfterSettingsCloses(t *testing.T) {
 	closePage()
 	if err := ctx.Err(); err != nil {
 		t.Fatalf("closing Settings ended the upload: %v", err)
+	}
+}
+
+func TestSessionPreferencesPersistAcrossSettingsHandlers(t *testing.T) {
+	sandboxHome(t)
+	read := func(mux *http.ServeMux) davsync.SessionPreferences {
+		t.Helper()
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("POST", "/api/davsync/session-candidates", strings.NewReader("{}")))
+		var reply struct {
+			Preferences      davsync.SessionPreferences `json:"preferences"`
+			PreferencesError string                     `json:"preferencesError"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &reply); w.Code != 200 || err != nil || reply.PreferencesError != "" {
+			t.Fatalf("session candidates: %d %s, %v", w.Code, w.Body, err)
+		}
+		return reply.Preferences
+	}
+	file := filepath.Join(settings.Dir(), "session-batch-preferences.json")
+	mux := http.NewServeMux()
+	backupRoutes(mux, folderOnly{})
+	if prefs := read(mux); !prefs.All {
+		t.Fatalf("default preferences: %+v", prefs)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatalf("reading defaults changed the config file: %v", err)
+	}
+	want := davsync.SessionPreferences{
+		Sources:     []sessions.BatchSource{{Agent: "codex", ID: "example", WSL: "Ubuntu"}},
+		SourceAgent: "codex", Search: "sample", BackupIDs: "previous\nretry",
+		Targets: []string{"codex", "claude"}, Cwd: "/example",
+	}
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("POST", "/api/davsync/session-preferences", strings.NewReader(string(raw))))
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("save preferences: %d %s", w.Code, w.Body)
+	}
+	if _, err := os.Stat(file); err != nil {
+		t.Fatal(err)
+	}
+	reopened := http.NewServeMux()
+	backupRoutes(reopened, folderOnly{})
+	if got := read(reopened); !reflect.DeepEqual(got, want) {
+		t.Fatalf("reopened preferences: %+v", got)
 	}
 }
 

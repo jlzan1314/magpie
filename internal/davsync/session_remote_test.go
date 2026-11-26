@@ -382,7 +382,7 @@ func TestSessionBatchSkipAndLocalChangeSync(t *testing.T) {
 	if err := store.open(manifestData, second.Backup, &current); err != nil {
 		t.Fatal(err)
 	}
-	truncatedPath := "/dav/magpie/" + batchDir + "/" + second.Backup + "/" + current.Entries[0] + ".sealed"
+	truncatedPath := "/dav/magpie/sessions/" + second.Backup + "/session_" + current.Entries[0] + ".sealed"
 	davSrv.mu.Lock()
 	orig, exists := davSrv.files[truncatedPath]
 	if !exists || len(orig) <= 10 {
@@ -486,11 +486,16 @@ func TestSessionBatchParts(t *testing.T) {
 	if manifest.Version != 3 || len(parts) < 2 {
 		t.Fatalf("split backup manifest: %+v", manifest)
 	}
-	first := "/" + strings.Join(append([]string{"dav", folder}, s.objectPath("parts", parts[0])...), "/")
-	second := "/" + strings.Join(append([]string{"dav", folder}, s.objectPath("parts", parts[1])...), "/")
+	first := "/dav/magpie/sessions/" + id + "/session_" + parts[0] + ".part.sealed"
+	second := "/dav/magpie/sessions/" + id + "/session_" + parts[1] + ".part.sealed"
 	fake.mu.Lock()
+	_, firstExists := fake.files[first]
+	_, secondExists := fake.files[second]
 	fake.files[first] = fake.files[second]
 	fake.mu.Unlock()
+	if !firstExists || !secondExists {
+		t.Fatalf("expected separate session_ files for both parts: %s and %s", first, second)
+	}
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	if _, err := s.load(ctx, id); err == nil || !strings.Contains(err.Error(), "part did not match its checksum") {
 		t.Fatalf("backup with a replaced part read without its checksum error: %v", err)
@@ -582,7 +587,7 @@ func TestSessionSyncResumesPreparedBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := batchStore{dav: d, passphrase: cfg.Passphrase, onPrepared: func(backup string) {
+	store := batchStore{dav: d, passphrase: cfg.Passphrase, remoteDir: batchDir, onPrepared: func(backup string) {
 		saveState(state{Key: stateKey(cfg), Sessions: &sessionSyncState{Pending: backup}})
 	}}
 	entries := []sessions.BatchConversation{
@@ -613,6 +618,36 @@ func TestSessionSyncResumesPreparedBackup(t *testing.T) {
 	if st.Sessions.Pending != "" || st.Sessions.Backup != id || st.Sessions.Error != "" {
 		t.Fatalf("completed snapshot: %+v", st.Sessions)
 	}
+	fake.mu.Lock()
+	_, publishedOldManifest := fake.files["/dav/magpie/session-batches-v2/"+id+"/manifest.sealed"]
+	_, createdNewDir := fake.dirs["/dav/magpie/sessions/"+id]
+	fake.mu.Unlock()
+	if !publishedOldManifest || createdNewDir {
+		t.Fatal("resuming an old backup did not use its original WebDAV collection")
+	}
+	reader := batchStore{dav: d, passphrase: cfg.Passphrase}
+	same, sameStats, err := reader.save(context.Background(), entries, true, batchPartSize)
+	if err != nil || same != id || sameStats.uploaded != 0 || sameStats.skipped != 3 {
+		t.Fatalf("same legacy backup was uploaded again: %s, %+v, %v", same, sameStats, err)
+	}
+	next := append(entries, sessions.BatchConversation{
+		Sources: []sessions.BatchSource{{Agent: "codex", ID: "three"}},
+		Parts:   []sessions.Part{{Role: "user", Kind: "text", Text: "new session"}},
+	})
+	newID, newStats, err := reader.save(context.Background(), next, true, batchPartSize)
+	if err != nil || newID == id || newStats.uploaded != 2 || newStats.skipped != 2 {
+		t.Fatalf("new backup did not reuse the old conversation files: %s, %+v, %v", newID, newStats, err)
+	}
+	fake.mu.Lock()
+	_, newManifest := fake.files["/dav/magpie/sessions/"+newID+"/session_manifest.sealed"]
+	fake.mu.Unlock()
+	if !newManifest {
+		t.Fatal("the new backup was not published in the sessions collection")
+	}
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if got, err := reader.load(context.Background(), id); err != nil || len(got) != len(entries) {
+		t.Fatalf("read from the old WebDAV collection: %d conversations, %v", len(got), err)
+	}
 }
 
 func TestSessionUploadOutlivesSetupDeadline(t *testing.T) {
@@ -622,7 +657,7 @@ func TestSessionUploadOutlivesSetupDeadline(t *testing.T) {
 	defer expireSetup()
 	fake := newSizeAwareDAV()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/"+batchDir+"/") {
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/"+sessionDAVDir+"/") {
 			expireSetup()
 		}
 		fake.ServeHTTP(w, r)

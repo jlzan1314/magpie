@@ -235,7 +235,26 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 		case "now":
 			err = busy(davsync.SyncNow(ctx))
 		case "session-candidates":
-			writeJSON(rw, map[string]any{"sources": sessions.BatchCandidates(), "targets": sessions.BatchImportTargets()})
+			prefs, err := davsync.LoadSessionPreferences()
+			candidates := map[string]any{
+				"sources": sessions.BatchCandidates(), "targets": sessions.BatchImportTargets(), "preferences": prefs,
+			}
+			if err != nil {
+				candidates["preferencesError"] = err.Error()
+			}
+			writeJSON(rw, candidates)
+			return
+		case "session-preferences":
+			var prefs davsync.SessionPreferences
+			if err := json.NewDecoder(http.MaxBytesReader(rw, r.Body, 1<<20)).Decode(&prefs); err != nil {
+				fail(rw, err)
+				return
+			}
+			if err := davsync.SaveSessionPreferences(prefs); err != nil {
+				fail(rw, err)
+				return
+			}
+			rw.WriteHeader(http.StatusNoContent)
 			return
 		case "session-backups":
 			out, err := davsync.ListSessionBackups(ctx)

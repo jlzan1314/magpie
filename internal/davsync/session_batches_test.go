@@ -27,7 +27,7 @@ func TestSessionBatch(t *testing.T) {
 	fake := &fakeDAV{files: map[string][]byte{}, etags: map[string]string{}, dirs: map[string]bool{"/dav": true}}
 	var publishFailure atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if publishFailure.Load() && r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/manifest.sealed") {
+		if publishFailure.Load() && r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/session_manifest.sealed") {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -143,7 +143,10 @@ func TestSessionBatch(t *testing.T) {
 	if len(fake.files) != 2 {
 		t.Errorf("expected an object and a manifest, got %d files", len(fake.files))
 	}
-	for _, raw := range fake.files {
+	for p, raw := range fake.files {
+		if !strings.HasPrefix(p, "/dav/magpie/sessions/"+first.Backup+"/session_") {
+			t.Errorf("new backup used an unexpected WebDAV path: %s", p)
+		}
 		if bytes.Contains(raw, []byte(message)) {
 			t.Error("WebDAV contains plaintext conversation")
 		}
@@ -262,7 +265,7 @@ func TestSessionBatch(t *testing.T) {
 	if err != nil || !big.Remote || big.Conversations != 1 {
 		t.Fatalf("long session upload: %+v, %v", big, err)
 	}
-	prefix := "/dav/" + folder + "/" + batchDir + "/" + big.Backup + "/"
+	prefix := "/dav/" + folder + "/" + sessionDAVDir + "/" + big.Backup + "/"
 	fake.mu.Lock()
 	for p, raw := range fake.files {
 		if strings.HasPrefix(p, prefix) && len(raw) >= 16<<20 {

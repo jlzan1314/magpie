@@ -64,6 +64,8 @@ func ListSessionBackups(ctx context.Context) (SessionBackups, error) {
 				items[id] = i
 			}
 		}
+	}
+	for _, parts := range [][]string{{sessionDAVDir}, {batchDir}, {legacyBatchDir, "backups"}} {
 		remote, err := listWebDAVSessionBackups(ctx, d, parts)
 		if err != nil {
 			out.WebDAVError = err.Error()
@@ -175,11 +177,12 @@ func DeleteSessionBackup(ctx context.Context, id, scope string) error {
 		if c.FollowServer {
 			return errors.New("this computer follows the server and can only delete local session backups")
 		}
-		deleted, err := deleteDAVBackup(ctx, d, d.url(folder, batchDir, id)+"/")
-		if err != nil || deleted {
-			return err
+		for _, dir := range []string{sessionDAVDir, batchDir} {
+			if _, err := deleteDAVBackup(ctx, d, d.url(folder, dir, id)+"/"); err != nil {
+				return err
+			}
 		}
-		_, err = deleteDAVBackup(ctx, d, d.url(folder, legacyBatchDir, "backups", id+".sealed"))
+		_, err := deleteDAVBackup(ctx, d, d.url(folder, legacyBatchDir, "backups", id+".sealed"))
 		return err
 	default:
 		return errors.New("choose local or WebDAV session backup")
