@@ -58,7 +58,7 @@ function serve(lang, posts) {
     fx: { rate: 7.2, stale: false },
   };
   let sync = { ...base, sessionsError: longSessionError };
-  let tokens = 0, previewed = 0, undos = 0;
+  let tokens = 0, previewed = 0, undos = 0, sessionPrefs = { all: true };
   return async (route) => {
     const request = route.request();
     const pathname = new URL(request.url()).pathname;
@@ -78,7 +78,12 @@ function serve(lang, posts) {
         { agent: "claude", id: "other", title: "Another conversation", cwd: "/project" },
       ],
       targets: ["codex"],
+      preferences: sessionPrefs,
     });
+    if (pathname === "/api/davsync/session-preferences") {
+      sessionPrefs = post();
+      return route.fulfill({ status: 204 });
+    }
     if (pathname === "/api/davsync/session-sync") {
       post();
       return json({backup:"example", remote:true, conversations:1, uploaded:0, skipped:2});
@@ -237,6 +242,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await click(batch.getByRole("button"));
         const panel = list.locator(".session-batch-form");
         const sessions = panel.locator(".session-batch-sources .session-batch-choice");
+        const allSessions = panel.getByRole("checkbox", { name: w("All readable sessions") });
+        assert.ok(await allSessions.isChecked(), "first open selects all sessions");
+        await allSessions.uncheck();
         await sessions.nth(1).waitFor();
         const search = panel.getByRole("textbox", { name: w("Filter sessions") });
         await search.fill("another");
@@ -270,6 +278,33 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await confirm.click();
         await panel.getByText(w("Remote files match packed size · skipped {skipped}",{skipped:2}),{exact:true}).waitFor();
         assert.equal(all("/api/davsync/session-sync").length,1);
+
+        await sessions.filter({ visible: true }).getByRole("checkbox").check();
+        await search.fill("Long title");
+        await panel.getByRole("textbox", { name: w("Existing backup IDs") }).fill("example");
+        await panel.getByRole("group", { name: w("Import into agents") }).getByRole("checkbox", { name: "Codex" }).check();
+        const savedDraft = page.waitForResponse(response => response.status() === 204 &&
+          response.url().endsWith("/api/davsync/session-preferences") &&
+          response.request().postDataJSON()?.cwd === "/fixture/project");
+        await panel.getByRole("textbox", { name: w("Target project folder") }).fill("/fixture/project");
+        await savedDraft;
+        await page.reload();
+        if (!await list.isVisible()) {
+          await page.locator("#prefs").click();
+          await openPart(page, "sync");
+        }
+        await click(batch.getByRole("button"));
+        await panel.getByRole("textbox", { name: w("Target project folder") }).waitFor();
+        await page.waitForFunction(() =>
+          [...document.querySelectorAll(".session-batch-form input")].some(input => input.value === "/fixture/project"));
+        assert.equal(await allSessions.isChecked(), false);
+        assert.equal(await search.inputValue(), "Long title");
+        assert.equal(await panel.getByRole("button", { name: w("Source agent") }).textContent(), "Codex");
+        assert.equal(await sessions.filter({ visible: true }).count(), 1);
+        assert.ok(await sessions.filter({ visible: true }).getByRole("checkbox").isChecked());
+        assert.equal(await panel.getByRole("textbox", { name: w("Existing backup IDs") }).inputValue(), "example");
+        assert.ok(await panel.getByRole("group", { name: w("Import into agents") }).getByRole("checkbox", { name: "Codex" }).isChecked());
+        assert.equal(all("/api/davsync/session-sync").length, 1, "editing a draft did not start a transfer");
         assert.deepEqual(errors, []);
       });
     }

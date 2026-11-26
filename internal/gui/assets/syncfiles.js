@@ -640,12 +640,39 @@ window.codexSessionForm = function (followsServer) {
   return form;
 };
 
+// A redraw can reopen the form before its last write comes back. Keep the
+// latest draft available and order the writes so they cannot arrive backward.
+let sessionPrefsDraft, sessionPrefsSaved, sessionPrefsSaving = false;
+async function rememberSessionPreferences(prefs) {
+  sessionPrefsDraft = prefs;
+  if (sessionPrefsSaving) return;
+  sessionPrefsSaving = true;
+  try {
+    while (sessionPrefsDraft !== sessionPrefsSaved) {
+      const writing = sessionPrefsDraft;
+      try {
+        await api("davsync/session-preferences", writing);
+        sessionPrefsSaved = writing;
+      } catch (e) {
+        statusErr(e);
+        if (writing === sessionPrefsDraft) return;
+      }
+    }
+  } finally {
+    sessionPrefsSaving = false;
+  }
+}
+
+const sessionRefKey = ({ agent, id, wsl }) => JSON.stringify([agent, id, wsl || ""]);
+
 window.sessionBatchForm = function (followsServer) {
+  const draftAtOpen = sessionPrefsDraft;
   const form = el("div", "editor sync-form session-batch-form");
   const sourceList = el("div", "session-batch-sources");
   const search = input("", t("Filter sessions"));
   search.setAttribute("aria-label", t("Filter sessions"));
   const all = batchTick(t("All readable sessions"));
+  all.input.checked = true;
   const agentPick = el("button", "proto");
   agentPick.type = "button";
   agentPick.setAttribute("aria-label", t("Source agent"));
@@ -657,7 +684,12 @@ window.sessionBatchForm = function (followsServer) {
   agentPick.onclick = () => {
     if (agentPick.classList.contains("open")) return closeProtoMenu();
     const options = [{ v: "", name: "All", note: "" }, ...sourceAgents.map(id => ({ v: id, name: agentName(id), note: "", literalName: true }))];
-    openProtoMenu(agentPick, options, sourceAgent, id => { sourceAgent = id; paintAgent(); filter(); }, "Source agent", "", "right");
+    openProtoMenu(agentPick, options, sourceAgent, id => {
+      sourceAgent = id;
+      paintAgent();
+      filter();
+      changed();
+    }, "Source agent", "", "right");
   };
   const filters = el("div", "pair session-batch-filters");
   filters.append(search, agentPick);
@@ -680,26 +712,43 @@ window.sessionBatchForm = function (followsServer) {
   const actions = el("div", "bar");
   if (!followsServer) actions.append(syncChanges);
   actions.append(backup, distribute);
+  const manager = sessionBackupManager(id => {
+    back.value = [back.value.trim(), id].filter(Boolean).join("\n");
+    changed();
+  });
   form.append(...field(t("Sessions"), sources),
     ...field(t("Existing backup IDs"), back),
     ...field(t("Import into agents"), destinations),
     ...field(t("Target project folder"), cwd),
-    sessionBackupManager(id => {
-      back.value = [back.value.trim(), id].filter(Boolean).join("\n");
-      update();
-    }), actions, output);
+    manager, actions, output);
 
-  let choices = [], targets = [], working = false;
+  let choices = [], targets = [], working = false, loaded = false;
   const ids = () => back.value.split(/[\s,]+/).filter(Boolean);
   const chosen = () => choices.filter(c => c.input.checked).map(c => c.ref);
+  const chosenTargets = () => targets.filter(c => c.input.checked).map(c => c.agent);
+  const selectingAll = () => all.input.checked && choices.length !== 0;
+  function changed() {
+    update();
+    if (loaded) rememberSessionPreferences({
+      all: all.input.checked,
+      sources: chosen(),
+      sourceAgent,
+      search: search.value,
+      backupIDs: back.value,
+      targets: chosenTargets(),
+      cwd: cwd.value,
+    });
+  }
   function update() {
-    const ready = ids().length !== 0 || all.input.checked || choices.some(c => c.input.checked);
+    const ready = loaded && (ids().length !== 0 || selectingAll() || choices.some(c => c.input.checked));
     backup.disabled = working || !ready;
     distribute.disabled = working || !ready || targets.every(c => !c.input.checked);
     syncChanges.disabled = working || choices.length === 0;
-    sourceList.hidden = all.input.checked;
-    agentPick.disabled = all.input.checked || sourceAgents.length === 0;
-    search.disabled = all.input.checked;
+    sourceList.hidden = all.input.checked && (!loaded || choices.length !== 0);
+    all.input.disabled = !loaded || !choices.length;
+    agentPick.disabled = !loaded || all.input.checked || sourceAgents.length === 0;
+    search.disabled = !loaded || all.input.checked;
+    back.disabled = cwd.disabled = manager.hidden = !loaded;
   }
   function filter() {
     const needle = search.value.trim().toLocaleLowerCase();
@@ -707,40 +756,53 @@ window.sessionBatchForm = function (followsServer) {
       c.label.hidden = !c.text.includes(needle) || (sourceAgent && c.ref.agent !== sourceAgent);
     }
   }
-  form.addEventListener("input", update);
+  form.addEventListener("input", changed);
   search.addEventListener("input", filter);
   update();
   api("davsync/session-candidates", {}).then((r) => {
+    if (!form.isConnected) return;
+    const prefs = (sessionPrefsDraft !== sessionPrefsSaved || draftAtOpen !== sessionPrefsDraft
+      ? sessionPrefsDraft : r.preferences) || {};
+    all.input.checked = prefs.all !== false;
+    search.value = prefs.search || "";
+    back.value = prefs.backupIDs || "";
+    cwd.value = prefs.cwd || "";
+    const selected = new Set((prefs.sources || []).map(sessionRefKey));
     choices = r.sources.map(({ agent, id, wsl, title, cwd }) => {
       const meta = [agentName(agent), wsl, cwd].filter(Boolean).join(" · ");
       const tick = batchTick(title || id);
       tick.label.lastElementChild.append(el("span", "sub", meta));
       tick.ref = { agent, id, wsl };
+      tick.input.checked = selected.has(sessionRefKey(tick.ref));
       tick.text = [title, meta, id].join(" ").toLocaleLowerCase();
       return tick;
     });
     sourceList.replaceChildren(...choices.map(c => c.label));
     sourceAgents = [...new Set(choices.map(c => c.ref.agent))].sort();
+    sourceAgent = sourceAgents.includes(prefs.sourceAgent) ? prefs.sourceAgent : "";
+    paintAgent();
     if (!choices.length) {
-      all.input.disabled = true;
       sourceList.append(el("div", "sub", t("No readable sessions found")));
     }
     targets = r.targets.map(agent => {
       const tick = batchTick(agent === "codex" ? "Codex" : "Claude Code");
       tick.agent = agent;
+      tick.input.checked = (prefs.targets || []).includes(agent);
       return tick;
     });
     destinations.append(...targets.map(c => c.label));
+    loaded = true;
     filter();
     update();
+    if (r.preferencesError) showBatchFailure(output, r.preferencesError);
   }).catch(err => showBatchFailure(output, err.message));
 
   async function run(importing) {
     const req = {
-      all: all.input.checked,
-      sources: all.input.checked ? [] : chosen(),
+      all: selectingAll(),
+      sources: selectingAll() ? [] : chosen(),
       backups: ids(),
-      targets: importing ? targets.filter(c => c.input.checked).map(c => c.agent) : [],
+      targets: importing ? chosenTargets() : [],
       cwd: importing ? cwd.value.trim() : "",
     };
     working = true;

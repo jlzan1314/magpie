@@ -25,19 +25,23 @@ func (s sessionSyncState) interrupted() bool {
 		strings.HasSuffix(s.Error, ": "+context.DeadlineExceeded.Error())
 }
 
-func (s sessionSyncState) pendingBackup() string {
-	if s.Pending != "" {
-		return s.Pending
-	}
-	// Versions without Pending kept the failing object's URL. Use its
-	// backup ID to find an already prepared local snapshot.
+func (s sessionSyncState) pendingBackup() (id, remoteDir string) {
+	// Versions without Pending kept the failing object's URL. It also
+	// identifies the collection where an upload had already started.
 	if s.interrupted() {
-		_, path, found := strings.Cut(s.Error, "/"+batchDir+"/")
-		if id, _, _ := strings.Cut(path, "/"); found && validBatchID(id) {
-			return id
+		for _, dir := range []string{sessionDAVDir, batchDir} {
+			prefix := "/" + dir + "/"
+			i := strings.LastIndex(s.Error, prefix)
+			if i < 0 {
+				continue
+			}
+			id, _, _ := strings.Cut(s.Error[i+len(prefix):], "/")
+			if validBatchID(id) && (s.Pending == "" || id == s.Pending) {
+				return id, dir
+			}
 		}
 	}
-	return ""
+	return s.Pending, ""
 }
 
 func (s sessionSyncState) currentError() string {
@@ -47,8 +51,10 @@ func (s sessionSyncState) currentError() string {
 		strings.HasSuffix(s.Error, ": session exceeds the 64 MiB uncompressed transcript limit") {
 		return ""
 	}
-	if s.interrupted() && s.pendingBackup() != "" {
-		return sessionUploadInterrupted
+	if s.interrupted() {
+		if id, _ := s.pendingBackup(); id != "" {
+			return sessionUploadInterrupted
+		}
 	}
 	return s.Error
 }
@@ -97,9 +103,10 @@ func recordSessionSync(ctx context.Context, c Config, st *state, explicit bool) 
 	status := st.Sessions
 	var result SessionBatchResult
 	var err error
-	status.Pending = status.pendingBackup()
+	pending, remoteDir := status.pendingBackup()
+	status.Pending = pending
 	if status.Pending != "" {
-		result, err = resumeSessionBatch(ctx, c, status.Pending)
+		result, err = resumeSessionBatch(ctx, c, status.Pending, remoteDir)
 		if errors.Is(err, fs.ErrNotExist) {
 			status.Pending = ""
 		}

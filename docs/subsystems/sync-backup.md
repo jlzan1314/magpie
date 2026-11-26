@@ -253,7 +253,10 @@ it does, and take it back.
 In **Settings → Sync and backup → Batch session backup and import**, select
 individual sessions or **All readable sessions**. The picker uses the same
 native transcript readers and session access choices as Sessions. Search
-the list or use the source Agent menu to narrow the selection. A
+the list or use the source Agent menu to narrow the selection. The first
+opening selects all readable sessions. Edits to the form are saved on
+this device in `session-batch-preferences.json` beside its settings and
+restored when the form reopens. A
 conversation from an unavailable reader cannot be selected. A blank
 conversation is skipped when selecting all. Enter existing backup IDs to
 merge earlier snapshots with the selection, and choose one or more import
@@ -276,6 +279,10 @@ transport limit. A version 3 manifest records their order and content
 hashes. This format requires an updated reader. The reader also accepts
 earlier manifests. For a two-way WebDAV
 computer, the conversation objects are published before the manifest.
+New backups use `magpie/sessions/<backup-id>/` on WebDAV. The encrypted
+files use the `session_` prefix, with a separate object for each
+conversation or part. Existing WebDAV backups are read from their original
+collections. Interrupted uploads continue in their original collection.
 Magpie compares the sealed file length at
 its content-addressed destination using WebDAV metadata. A match skips the
 file body. A new backup can reuse an unchanged conversation from the last

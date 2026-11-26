@@ -24,6 +24,7 @@ import (
 
 const batchDir = "session-batches-v2"
 const legacyBatchDir = "session-batches-v1"
+const sessionDAVDir = "sessions"
 const batchPackedLimit = 64 << 20
 
 var errBatchPackedTooLarge = errors.New("packed session backup exceeds 64 MiB")
@@ -66,6 +67,7 @@ type batchStore struct {
 	dav        *dav
 	passphrase string
 	batchID    string
+	remoteDir  string
 	onPrepared func(string)
 }
 
@@ -235,13 +237,14 @@ func (s batchStore) publish(ctx context.Context, objects []batchObject) (string,
 	last, _ := os.ReadFile(hint)
 	previous := s
 	previous.batchID = string(last)
-	sizes, err := s.dav.listRemoteSizes(ctx, folder, batchDir, s.batchID)
+	s, sizes, err := s.locateRemoteBatch(ctx)
 	if err != nil {
 		return s.batchID, stats, err
 	}
 	var previousSizes map[string]int64
 	if validBatchID(previous.batchID) && previous.batchID != s.batchID {
-		previousSizes, err = s.dav.listRemoteSizes(ctx, folder, batchDir, previous.batchID)
+		previous.remoteDir = ""
+		previous, previousSizes, err = previous.locateRemoteBatch(ctx)
 		if err != nil {
 			return s.batchID, stats, err
 		}
@@ -254,7 +257,7 @@ func (s batchStore) publish(ctx context.Context, objects []batchObject) (string,
 		if err != nil {
 			return s.batchID, stats, err
 		}
-		name := filepath.Base(file)
+		name := s.remoteObjectPath(kind, id)[2]
 		same, exists, err := s.dav.remoteSizeMatches(ctx, s.url(kind, id), info.Size(), sizes, name)
 		if err != nil {
 			return s.batchID, stats, err
@@ -264,21 +267,23 @@ func (s batchStore) publish(ctx context.Context, objects []batchObject) (string,
 			continue
 		}
 		if !ready {
-			for _, dirs := range [][]string{{folder}, {folder, batchDir}, {folder, batchDir, s.batchID}} {
+			for _, dirs := range [][]string{{folder}, {folder, s.remoteDir}, {folder, s.remoteDir, s.batchID}} {
 				if err := s.dav.ensureSessionCollection(ctx, dirs); err != nil {
 					return s.batchID, stats, err
 				}
 			}
 			ready = true
 		}
-		if size, found := previousSizes[name]; kind != "backups" && !exists && found && size == info.Size() {
-			copied, err := s.copyObject(ctx, previous, object, size)
-			if err != nil {
-				return s.batchID, stats, err
-			}
-			if copied {
-				stats.skipped++
-				continue
+		if previousSizes != nil && kind != "backups" && !exists {
+			if size, found := previousSizes[previous.remoteObjectPath(kind, id)[2]]; found && size == info.Size() {
+				copied, err := s.copyObject(ctx, previous, object, size)
+				if err != nil {
+					return s.batchID, stats, err
+				}
+				if copied {
+					stats.skipped++
+					continue
+				}
 			}
 		}
 		raw, err := readBatchFile(file)
@@ -297,6 +302,38 @@ func (s batchStore) publish(ctx context.Context, objects []batchObject) (string,
 		_ = steady.WriteFile(hint, []byte(s.batchID), 0o600)
 	}
 	return s.batchID, stats, nil
+}
+
+// A known backup stays in the collection where it was first uploaded.
+// This keeps same-size skips and interrupted transfers valid after an upgrade.
+func (s batchStore) locateRemoteBatch(ctx context.Context) (batchStore, map[string]int64, error) {
+	if s.remoteDir != "" {
+		sizes, err := s.dav.listRemoteSizes(ctx, folder, s.remoteDir, s.batchID)
+		return s, sizes, err
+	}
+	s.remoteDir = sessionDAVDir
+	sizes, found, err := s.remoteBatchContents(ctx)
+	if err != nil || found {
+		return s, sizes, err
+	}
+	legacy := s
+	legacy.remoteDir = batchDir
+	olderSizes, found, err := legacy.remoteBatchContents(ctx)
+	if err != nil || found {
+		return legacy, olderSizes, err
+	}
+	return s, sizes, nil
+}
+
+func (s batchStore) remoteBatchContents(ctx context.Context) (map[string]int64, bool, error) {
+	sizes, err := s.dav.listRemoteSizes(ctx, folder, s.remoteDir, s.batchID)
+	if err != nil || sizes != nil {
+		return sizes, len(sizes) != 0, err
+	}
+	// PROPFIND is optional on some servers. A completed manifest is enough
+	// to identify a backup on those servers.
+	_, found, err := s.dav.remoteSize(ctx, s.url("backups", s.batchID))
+	return nil, found, err
 }
 
 func (s batchStore) copyObject(ctx context.Context, previous batchStore, object batchObject, size int64) (bool, error) {
@@ -334,7 +371,7 @@ func (m batchManifest) valid(version int) bool {
 
 // resumeSessionBatch publishes an already sealed local snapshot. Live Agent
 // history may have changed while the earlier upload was interrupted.
-func resumeSessionBatch(ctx context.Context, c Config, id string) (SessionBatchResult, error) {
+func resumeSessionBatch(ctx context.Context, c Config, id, remoteDir string) (SessionBatchResult, error) {
 	ctx = withSessionDAVTimeouts(ctx)
 	var result SessionBatchResult
 	if !validBatchID(id) {
@@ -344,7 +381,7 @@ func resumeSessionBatch(ctx context.Context, c Config, id string) (SessionBatchR
 	if err != nil {
 		return result, err
 	}
-	s := batchStore{dav: d, passphrase: c.Passphrase, batchID: id}
+	s := batchStore{dav: d, passphrase: c.Passphrase, batchID: id, remoteDir: remoteDir}
 	raw, err := readBatchFile(s.filename("backups", id))
 	if err != nil {
 		return result, err
@@ -455,7 +492,16 @@ func (s batchStore) filename(kind, id string) string {
 }
 
 func (s batchStore) url(kind, id string) string {
-	return s.dav.url(append([]string{folder}, s.objectPath(kind, id)...)...)
+	return s.dav.url(append([]string{folder}, s.remoteObjectPath(kind, id)...)...)
+}
+
+func (s batchStore) remoteObjectPath(kind, id string) []string {
+	parts := s.objectPath(kind, id)
+	if s.batchID != "" && s.remoteDir != batchDir {
+		parts[0] = sessionDAVDir
+		parts[2] = "session_" + parts[2]
+	}
+	return parts
 }
 
 func (s batchStore) keepLocal(kind, id string, plain []byte) ([]byte, error) {
@@ -567,7 +613,7 @@ func checkBatchJSONTail(r io.Reader) error {
 	}
 }
 
-func (s batchStore) loadObject(ctx context.Context, kind, id string, into any) error {
+func (s *batchStore) loadObject(ctx context.Context, kind, id string, into any) error {
 	raw, fetched, err := s.loadRaw(ctx, kind, id)
 	if err != nil {
 		return err
@@ -581,7 +627,7 @@ func (s batchStore) loadObject(ctx context.Context, kind, id string, into any) e
 	return nil
 }
 
-func (s batchStore) loadRaw(ctx context.Context, kind, id string) ([]byte, bool, error) {
+func (s *batchStore) loadRaw(ctx context.Context, kind, id string) ([]byte, bool, error) {
 	if !validBatchID(id) {
 		return nil, false, errors.New("enter a valid session backup ID")
 	}
@@ -594,7 +640,19 @@ func (s batchStore) loadRaw(ctx context.Context, kind, id string) ([]byte, bool,
 	return raw, fetched, err
 }
 
-func (s batchStore) remote(ctx context.Context, kind, id string) ([]byte, error) {
+func (s *batchStore) remote(ctx context.Context, kind, id string) ([]byte, error) {
+	raw, err := s.remoteAt(ctx, kind, id)
+	if s.batchID != "" && s.remoteDir == "" && errors.Is(err, errSessionBackupMissing) {
+		s.remoteDir = batchDir
+		raw, err = s.remoteAt(ctx, kind, id)
+		if err != nil {
+			s.remoteDir = ""
+		}
+	}
+	return raw, err
+}
+
+func (s batchStore) remoteAt(ctx context.Context, kind, id string) ([]byte, error) {
 	res, err := s.dav.do(ctx, http.MethodGet, s.url(kind, id), nil, nil)
 	if err != nil {
 		return nil, err
