@@ -51,8 +51,9 @@ const plan = (token) => ({
 });
 
 function serve(lang, posts) {
+  const theme = process.env.MAGPIE_TEST_THEME || "light";
   const settings = {
-    theme: "light", lang, tray: "panel", version: "test", dir: "/tmp/magpie",
+    theme, lang, tray: "panel", version: "test", dir: "/tmp/magpie",
     gateway: "http://127.0.0.1:3425", visionModels: [], imageGenModels: [],
     fx: { rate: 7.2, stale: false },
   };
@@ -63,7 +64,7 @@ function serve(lang, posts) {
     const pathname = new URL(request.url()).pathname;
     const json = (data, status = 200) => route.fulfill({ status, json: data });
     const post = () => { const body = request.postDataJSON(); posts.push({ path: pathname, body }); return body; };
-    if (pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:false};` });
+    if (pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = ${JSON.stringify({lang, theme, web:false})};` });
     if (pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (pathname === "/api/state") return json({ agents: [], profiles: [], settings });
     if (pathname === "/api/settings") return json(settings);
@@ -72,7 +73,10 @@ function serve(lang, posts) {
     if (pathname === "/api/plugins") return json({ plugins: [] });
     if (pathname === "/api/davsync") return json(sync);
     if (pathname === "/api/davsync/session-candidates") return json({
-      sources: [{ agent: "codex", id: "sample", title: "Long title ".repeat(18), cwd: "/project/" + "directory".repeat(28) }],
+      sources: [
+        { agent: "codex", id: "sample", title: "Long title ".repeat(18), cwd: "/project/" + "directory".repeat(28) },
+        { agent: "claude", id: "other", title: "Another conversation", cwd: "/project" },
+      ],
       targets: ["codex"],
     });
     if (pathname === "/api/davsync/session-sync") {
@@ -232,22 +236,35 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const batch = list.locator(".sync-session-row", { hasText: w("Batch session backup and import") });
         await click(batch.getByRole("button"));
         const panel = list.locator(".session-batch-form");
-        await panel.locator(".session-batch-sources .session-batch-choice").waitFor();
+        const sessions = panel.locator(".session-batch-sources .session-batch-choice");
+        await sessions.nth(1).waitFor();
+        const search = panel.getByRole("textbox", { name: w("Filter sessions") });
+        await search.fill("another");
+        assert.equal(await sessions.filter({ visible: true }).count(), 1);
+        await search.clear();
+        await panel.getByRole("button", { name: w("Source agent") }).click();
+        await page.getByRole("menuitemradio", { name: "Codex", exact: true }).click();
+        assert.equal(await sessions.filter({ visible: true }).count(), 1);
+        assert.match(await sessions.filter({ visible: true }).textContent(), /Long title/);
         const geometry = await panel.evaluate((form) => {
-          const [sources, destinations] = form.querySelectorAll("fieldset");
+          const list = form.querySelector(".session-batch-sources");
+          const destinations = form.querySelector(".session-batch-targets");
           const backup = form.querySelector("textarea");
-          const list = sources.querySelector(".session-batch-sources");
           const err = document.querySelector(".session-batch-error");
           const box = (node) => node.getBoundingClientRect();
           return {
-            fullWidth: box(sources).width >= box(form).width - 40 && box(destinations).width === box(sources).width,
-            separateRows: box(backup).top >= box(sources).bottom && box(destinations).top >= box(backup).bottom,
+            alignedFields: Math.abs(box(list).left - box(backup).left) < 1 && Math.abs(box(list).width - box(backup).width) < 1,
+            separateRows: box(backup).top >= box(list).bottom && box(destinations).top >= box(backup).bottom,
             listFits: list.scrollWidth <= list.clientWidth + 1,
-            errorFits: err.scrollWidth <= err.clientWidth + 1,
+            errorFits: !!err.closest(".sync-session-row") && err.scrollWidth <= err.clientWidth + 1,
           };
         });
-        assert.deepEqual(geometry, { fullWidth: true, separateRows: true, listFits: true, errorFits: true });
-        await noneWider(page, ".session-batch-form, .session-batch-form fieldset, .session-batch-form .bar > button");
+        assert.deepEqual(geometry, { alignedFields: true, separateRows: true, listFits: true, errorFits: true });
+        await noneWider(page, ".session-batch-form, .session-batch-form .bar > button");
+        if (process.env.ARTIFACT_DIR) {
+          await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
+          await panel.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${width}-${lang}-session-batch.png`) });
+        }
         await click(panel.getByRole("button",{name:w("Sync local changes"),exact:true}));
         const confirm = page.getByRole("alertdialog").getByRole("button",{name:w("Sync local changes"),exact:true});
         await confirm.click();

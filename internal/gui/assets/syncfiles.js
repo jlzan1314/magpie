@@ -570,6 +570,7 @@ window.askPreviewRows = function (at, v, sub) {
     val.append(b);
     r.append(who, val);
     at.append(r);
+    return r;
   };
   if (v.kind === "webdav") sessionTransferRows(at, v, row);
   const peek = el("button", "text", t("Preview…"));
@@ -587,12 +588,11 @@ window.askPreviewRows = function (at, v, sub) {
 };
 
 function sessionTransferRows(at, v, row) {
-  if (v.sessionsError) showBatchFailure(at, v.sessionsError);
   const cards = [
     ["Batch session backup and import", "Merge selected conversations, back them up, and import into the agents you choose.", () => window.sessionBatchForm(!!v.followServer)],
     ["Codex session transfer", "Transfer one compressed and encrypted conversation by ID.", () => window.codexSessionForm(!!v.followServer)],
   ];
-  for (const [title, subtitle, form] of cards) {
+  for (const [index, [title, subtitle, form]] of cards.entries()) {
     const button = el("button", "text", t("Open"));
     const panel = el("div");
     button.type = "button";
@@ -601,24 +601,22 @@ function sessionTransferRows(at, v, row) {
       else panel.append(form());
       button.textContent = t(panel.firstChild ? "Close" : "Open");
     };
-    row(t(title), t(subtitle), button, "sync-session-row");
+    const heading = row(t(title), t(subtitle), button, "sync-session-row");
+    if (index === 0 && v.sessionsError) showBatchFailure(heading.querySelector(".who"), v.sessionsError);
     at.append(panel);
   }
 }
 
 window.codexSessionForm = function (followsServer) {
   const form = el("div", "editor sync-form");
-  const field = el("input");
-  field.placeholder = t("Session ID");
-  field.setAttribute("aria-label", field.placeholder);
-  field.autocomplete = "off";
+  const sessionID = input("", "");
   const download = el("button", "text", t("Download"));
   const upload = el("button", "text", t("Upload…"));
-  const message = el("div", "sub wraps");
+  const message = el("div", "done sub wraps");
   message.setAttribute("role", "status");
   const transfer = async (action) => {
-    const id = field.value.trim();
-    if (!id) { field.focus(); return; }
+    const id = sessionID.value.trim();
+    if (!id) { sessionID.focus(); return; }
     upload.disabled = download.disabled = true;
     message.textContent = "";
     message.classList.remove("bad");
@@ -636,50 +634,63 @@ window.codexSessionForm = function (followsServer) {
   };
   upload.onclick = () => transfer("push");
   download.onclick = () => transfer("pull");
-  form.append(field, download);
-  if (!followsServer) form.append(upload);
-  form.append(message);
+  const actions = el("div", "bar", download);
+  if (!followsServer) actions.append(upload);
+  form.append(...field(t("Session ID"), sessionID), actions, message);
   return form;
 };
 
 window.sessionBatchForm = function (followsServer) {
   const form = el("div", "editor sync-form session-batch-form");
   const sourceList = el("div", "session-batch-sources");
-  const search = el("input");
-  search.type = "search";
-  search.placeholder = t("Filter sessions");
-  search.setAttribute("aria-label", search.placeholder);
+  const search = input("", t("Filter sessions"));
+  search.setAttribute("aria-label", t("Filter sessions"));
   const all = batchTick(t("All readable sessions"));
-  const agents = batchField(t("Source agent"), "select");
-  const everyAgent = el("option", "", t("All"));
-  everyAgent.value = "";
-  agents.input.append(everyAgent);
-  const sources = el("fieldset");
-  const filters = el("div", "session-batch-filters", agents.label, search);
-  sources.append(el("legend", "", t("Sessions")), all.label, filters, sourceList);
+  const agentPick = el("button", "proto");
+  agentPick.type = "button";
+  agentPick.setAttribute("aria-label", t("Source agent"));
+  agentPick.setAttribute("aria-haspopup", "menu");
+  const agentName = id => state.agents?.find(a => a.id === id)?.name || (id === "codex" ? "Codex" : id);
+  let sourceAgent = "", sourceAgents = [];
+  const paintAgent = () => agentPick.replaceChildren(el("span", "", sourceAgent ? agentName(sourceAgent) : t("All")), svg(CHEV, 11, 1.6));
+  paintAgent();
+  agentPick.onclick = () => {
+    if (agentPick.classList.contains("open")) return closeProtoMenu();
+    const options = [{ v: "", name: "All", note: "" }, ...sourceAgents.map(id => ({ v: id, name: agentName(id), note: "", literalName: true }))];
+    openProtoMenu(agentPick, options, sourceAgent, id => { sourceAgent = id; paintAgent(); filter(); }, "Source agent", "", "right");
+  };
+  const filters = el("div", "pair session-batch-filters");
+  filters.append(search, agentPick);
+  const sources = el("div", "stack");
+  sources.append(filters, all.label, sourceList);
 
-  const back = batchField(t("Existing backup IDs"), "textarea");
-  back.input.rows = 2;
-  const cwd = batchField(t("Target project folder"), "input");
-  const destinations = el("fieldset");
-  destinations.append(el("legend", "", t("Import into agents")));
+  const back = el("textarea", "session-backup-ids");
+  back.rows = 2;
+  back.spellcheck = false;
+  const cwd = input("", "");
+  const destinations = el("div", "pair wrap session-batch-targets");
+  destinations.setAttribute("role", "group");
+  destinations.setAttribute("aria-label", t("Import into agents"));
   const backup = el("button", "text", t("Back up"));
   const distribute = el("button", "text primary", t("Back up and import"));
   const syncChanges = el("button", "text", t("Sync local changes"));
   backup.type = distribute.type = syncChanges.type = "button";
-  const output = el("div", "session-batch-output sub wraps");
+  const output = el("div", "done session-batch-output sub wraps");
   output.setAttribute("role", "status");
   const actions = el("div", "bar");
-  actions.append(backup, distribute);
   if (!followsServer) actions.append(syncChanges);
-  form.append(sources, back.label, destinations, cwd.label, actions, output,
+  actions.append(backup, distribute);
+  form.append(...field(t("Sessions"), sources),
+    ...field(t("Existing backup IDs"), back),
+    ...field(t("Import into agents"), destinations),
+    ...field(t("Target project folder"), cwd),
     sessionBackupManager(id => {
-      back.input.value = [back.input.value.trim(), id].filter(Boolean).join("\n");
+      back.value = [back.value.trim(), id].filter(Boolean).join("\n");
       update();
-    }));
+    }), actions, output);
 
   let choices = [], targets = [], working = false;
-  const ids = () => back.input.value.split(/[\s,]+/).filter(Boolean);
+  const ids = () => back.value.split(/[\s,]+/).filter(Boolean);
   const chosen = () => choices.filter(c => c.input.checked).map(c => c.ref);
   function update() {
     const ready = ids().length !== 0 || all.input.checked || choices.some(c => c.input.checked);
@@ -687,32 +698,29 @@ window.sessionBatchForm = function (followsServer) {
     distribute.disabled = working || !ready || targets.every(c => !c.input.checked);
     syncChanges.disabled = working || choices.length === 0;
     sourceList.hidden = all.input.checked;
-    agents.input.disabled = search.disabled = all.input.checked;
+    agentPick.disabled = all.input.checked || sourceAgents.length === 0;
+    search.disabled = all.input.checked;
   }
   function filter() {
     const needle = search.value.trim().toLocaleLowerCase();
     for (const c of choices) {
-      c.label.hidden = !c.text.includes(needle) || (agents.input.value && c.ref.agent !== agents.input.value);
+      c.label.hidden = !c.text.includes(needle) || (sourceAgent && c.ref.agent !== sourceAgent);
     }
   }
   form.addEventListener("input", update);
   search.addEventListener("input", filter);
-  agents.input.addEventListener("change", filter);
   update();
   api("davsync/session-candidates", {}).then((r) => {
     choices = r.sources.map(({ agent, id, wsl, title, cwd }) => {
-      const label = [agent, wsl, title || id, cwd].filter(Boolean).join(" · ");
-      const tick = batchTick(label);
+      const meta = [agentName(agent), wsl, cwd].filter(Boolean).join(" · ");
+      const tick = batchTick(title || id);
+      tick.label.lastElementChild.append(el("span", "sub", meta));
       tick.ref = { agent, id, wsl };
-      tick.text = (label + " " + id).toLocaleLowerCase();
+      tick.text = [title, meta, id].join(" ").toLocaleLowerCase();
       return tick;
     });
     sourceList.replaceChildren(...choices.map(c => c.label));
-    for (const agent of [...new Set(choices.map(c => c.ref.agent))].sort()) {
-      const option = el("option", "", agent);
-      option.value = agent;
-      agents.input.append(option);
-    }
+    sourceAgents = [...new Set(choices.map(c => c.ref.agent))].sort();
     if (!choices.length) {
       all.input.disabled = true;
       sourceList.append(el("div", "sub", t("No readable sessions found")));
@@ -733,7 +741,7 @@ window.sessionBatchForm = function (followsServer) {
       sources: all.input.checked ? [] : chosen(),
       backups: ids(),
       targets: importing ? targets.filter(c => c.input.checked).map(c => c.agent) : [],
-      cwd: importing ? cwd.input.value.trim() : "",
+      cwd: importing ? cwd.value.trim() : "",
     };
     working = true;
     update();
@@ -783,16 +791,8 @@ window.sessionBatchForm = function (followsServer) {
 };
 
 function batchTick(text) {
-  const label = el("label", "tick session-batch-choice"), input = el("input");
-  input.type = "checkbox";
-  label.append(input, el("span", "", text));
-  return { label, input };
-}
-
-function batchField(text, type) {
-  const label = el("label", "session-batch-field"), input = el(type);
-  input.autocomplete = "off";
-  label.append(el("span", "", text), input);
+  const [label, input] = tick(text, false);
+  label.classList.add("session-batch-choice");
   return { label, input };
 }
 
@@ -838,11 +838,13 @@ function showBatchResult(out, r) {
 }
 
 function sessionBackupManager(use) {
-  const box = el("details", "session-batch-manager");
+  const box = el("details", "more session-batch-manager");
   const list = el("div", "sub wraps");
   const refresh = el("button", "text", t("Refresh"));
   refresh.type = "button";
-  box.append(el("summary", "", t("Manage session backups")), refresh, list);
+  const body = el("div", "stack");
+  body.append(el("div", "bar", refresh), list);
+  box.append(el("summary", "", t("Manage session backups")), body);
 
   async function remove(id, scope) {
     const where = scope === "local" ? t("Delete local backup") : t("Delete WebDAV backup");

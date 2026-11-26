@@ -3914,7 +3914,7 @@ body:not(.side-nav) #addSheet > .row-head.stuck::before { opacity: 1; box-shadow
   font-size: 12.5px; outline: none; width: 100%; min-width: 0;
   transition: border-color .12s, box-shadow .12s;
 }
-.editor input:focus, .editor .headers textarea.json:focus, .editor .extra-body textarea.json:focus, .acc input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); outline: none; }
+.editor input:focus, .editor .headers textarea.json:focus, .editor .extra-body textarea.json:focus, .editor textarea.session-backup-ids:focus, .acc input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); outline: none; }
 .editor input::placeholder, .acc input::placeholder { color: var(--faint); }
 .editor .pair { display: flex; gap: 8px; align-items: center; }
 .editor .pair input:first-child { flex: 1; }
@@ -3946,7 +3946,7 @@ body:not(.side-nav) #addSheet > .row-head.stuck::before { opacity: 1; box-shadow
 .editor .headers .pair.col .hhead { display: flex; gap: 8px; align-items: center; width: 100%; }
 .editor .headers .pair.col .hhead input { flex: 1; min-width: 0; }
 .editor .headers .pair.col .side { flex: none; }
-.editor .headers textarea.json, .editor .extra-body textarea.json { width: 100%; box-sizing: border-box; padding: 7px 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); color: var(--fg); outline: none; font-family: var(--code-font, var(--code)); font-size: 12px; line-height: 1.5; resize: vertical; tab-size: 2; white-space: pre; overflow: auto; transition: border-color .12s, box-shadow .12s; }
+.editor .headers textarea.json, .editor .extra-body textarea.json, .editor textarea.session-backup-ids { width: 100%; box-sizing: border-box; padding: 7px 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); color: var(--fg); outline: none; font-family: var(--code-font, var(--code)); font-size: 12px; line-height: 1.5; resize: vertical; tab-size: 2; white-space: pre; overflow: auto; transition: border-color .12s, box-shadow .12s; }
 :where(html[data-fonts]) .editor .headers textarea.json, :where(html[data-fonts]) .editor .extra-body textarea.json { font-style: var(--code-style, inherit); font-weight: var(--code-weight, inherit); font-stretch: var(--code-stretch, 100%); }
 .editor .headers textarea.json.bad, .editor .extra-body textarea.json.bad { border-color: var(--danger, #d66); }
 /* a provider's extra body fields (#1604): the JSON, and why it can't be saved */
@@ -5818,62 +5818,44 @@ body.linux .action-confirm::backdrop { -webkit-backdrop-filter: none; backdrop-f
 .relay-line.err, .relay-part.err { color: var(--red); }
 .relay-wait { font-size: 12px; }
 
-.editor.sync-form.session-batch-form {
-  grid-template-columns: minmax(0, 1fr);
-  align-items: stretch;
-  gap: 10px;
-}
-.session-batch-form fieldset {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 6px;
-  min-inline-size: 0;
-  margin: 0;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-}
-.session-batch-filters {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
-  align-items: end;
-  gap: 8px;
-}
+.session-batch-form > label { overflow-wrap: anywhere; }
+.session-batch-filters .proto { flex: none; max-width: 50%; }
 .session-batch-sources {
   max-block-size: min(320px, 45vh);
   overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--card);
 }
-.session-batch-choice > input {
-  flex: none;
+.editor .session-batch-sources > label.tick {
+  align-items: flex-start;
+  padding: 7px 10px;
 }
+.editor .session-batch-sources > label.tick + label.tick { border-top: 1px solid var(--line-2); }
+.editor .session-batch-sources > label.tick input { margin-top: 2px; }
+.session-batch-choice > input { flex: none; }
 .session-batch-choice > span,
 .session-batch-form code,
 .session-batch-error {
   min-inline-size: 0;
   overflow-wrap: anywhere;
 }
-.session-batch-sources .session-batch-choice {
-  margin-block: 4px;
-}
-.session-batch-form [hidden] {
-  display: none;
-}
-.session-batch-form .session-batch-field {
-  display: grid;
-  gap: 4px;
-  min-inline-size: 0;
-  text-align: start;
-}
-.session-batch-form :is(.session-batch-field > :is(input, select, textarea), .session-batch-filters > input) {
-  box-sizing: border-box;
-  inline-size: 100%;
-  min-inline-size: 0;
-}
-.session-batch-form .bar,
+.session-batch-sources .session-batch-choice .sub { display: block; color: var(--muted); font-size: 11px; }
+.session-batch-form [hidden], .session-batch-output:empty { display: none; }
+.session-batch-manager > .stack { margin-inline-start: var(--ed-at, 86px); }
 .session-batch-backup,
 .session-batch-result {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+@media (max-width: 540px) {
+  .editor.sync-form.session-batch-form {
+    --ed-at: 0px;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    row-gap: 7px;
+  }
+  .editor.session-batch-form > label { text-align: start; }
 }
