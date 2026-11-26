@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/settings"
@@ -22,6 +23,8 @@ import (
 type SessionBackup struct {
 	remoteTime time.Time // remote collection timestamp, independent of a later local restore
 	ID         string    `json:"id"`
+	Current    bool      `json:"current,omitempty"`
+	Layouts    []string  `json:"layouts,omitempty"`
 	Local      bool      `json:"local"`
 	WebDAV     bool      `json:"webdav"`
 	Updated    time.Time `json:"updated,omitzero"`
@@ -42,8 +45,69 @@ func ListSessionBackups(ctx context.Context) (SessionBackups, error) {
 }
 
 func listSessionBackups(ctx context.Context, c Config, d *dav) (SessionBackups, error) {
+	return sessionBackupIndex(ctx, c, d, "")
+}
+
+// RestoreIndex lists names and timestamps. Local and WebDAV indexes can be
+// requested independently, so an offline server never holds up local results.
+func RestoreIndex(ctx context.Context, scope string) (SessionBackups, error) {
+	if scope != "local" && scope != "webdav" {
+		return SessionBackups{}, errors.New("unknown session backup location")
+	}
+	c, d, err := sessionBackupDAV()
+	if err != nil {
+		return SessionBackups{}, err
+	}
+	return sessionBackupIndex(withSessionDAVTimeouts(ctx), c, d, scope)
+}
+
+func sessionBackupIndex(ctx context.Context, c Config, d *dav, scope string) (SessionBackups, error) {
 	out := SessionBackups{Items: []SessionBackup{}, CanDeleteWebDAV: !c.FollowServer}
 	items := map[string]SessionBackup{}
+	if scope != "webdav" {
+		heads, err := os.ReadDir(filepath.Join(currentStore(c, d).localRoot, "heads"))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return out, err
+		}
+		for _, head := range heads {
+			if name, ok := strings.CutSuffix(head.Name(), ".json"); ok && validBatchID(name) {
+				info, err := head.Info()
+				if err != nil {
+					continue
+				}
+				i := items[currentSessionID]
+				i.ID, i.Local, i.Current = currentSessionID, true, true
+				if info.ModTime().After(i.Updated) {
+					i.Updated = info.ModTime()
+				}
+				items[currentSessionID] = i
+			}
+		}
+		if err := listLocalSessionBackups(ctx, items); err != nil {
+			return out, err
+		}
+	}
+	if scope != "local" {
+		if err := listRemoteSessionBackups(ctx, d, items); err != nil {
+			out.WebDAVError = err.Error()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return out, err
+	}
+	for _, i := range items {
+		out.Items = append(out.Items, i)
+	}
+	slices.SortFunc(out.Items, func(a, b SessionBackup) int {
+		if n := b.Updated.Compare(a.Updated); n != 0 {
+			return n
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return out, nil
+}
+
+func listLocalSessionBackups(ctx context.Context, items map[string]SessionBackup) error {
 	for _, v := range []string{batchDir, legacyBatchDir} {
 		parts := []string{v}
 		if v == legacyBatchDir {
@@ -52,9 +116,12 @@ func listSessionBackups(ctx context.Context, c Config, d *dav) (SessionBackups, 
 		root := filepath.Join(append([]string{settings.Dir()}, parts...)...)
 		entries, err := os.ReadDir(root)
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return out, err
+			return err
 		}
 		for _, e := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			id := backupEntryID(e.Name(), v)
 			if id == "" {
 				continue
@@ -70,34 +137,35 @@ func listSessionBackups(ctx context.Context, c Config, d *dav) (SessionBackups, 
 			}
 		}
 	}
-	for _, parts := range [][]string{{sessionDAVDir}, {batchDir}, {legacyBatchDir, "backups"}} {
-		remote, err := listWebDAVSessionBackups(ctx, d, parts)
-		if err != nil {
-			out.WebDAVError = err.Error()
-			continue
-		}
+	return nil
+}
+
+func listRemoteSessionBackups(ctx context.Context, d *dav, items map[string]SessionBackup) error {
+	dirs := [][]string{{sessionDAVDir}, {batchDir}, {legacyBatchDir, "backups"}}
+	// Each worker owns one result slot. Merge in layout priority order.
+	lists := make([]map[string]time.Time, len(dirs))
+	errs := make([]error, len(dirs))
+	var wg sync.WaitGroup
+	for i, parts := range dirs {
+		wg.Go(func() { lists[i], errs[i] = listWebDAVSessionBackups(ctx, d, parts) })
+	}
+	wg.Wait()
+	for i, remote := range lists {
 		for id, modified := range remote {
-			i := items[id]
-			i.ID, i.WebDAV = id, true
-			if modified.After(i.remoteTime) {
-				i.remoteTime = modified
+			item := items[id]
+			item.ID, item.WebDAV = id, true
+			item.Current = id == currentSessionID
+			item.Layouts = append(item.Layouts, dirs[i][0])
+			if modified.After(item.remoteTime) {
+				item.remoteTime = modified
 			}
-			if modified.After(i.Updated) {
-				i.Updated = modified
+			if modified.After(item.Updated) {
+				item.Updated = modified
 			}
-			items[id] = i
+			items[id] = item
 		}
 	}
-	for _, i := range items {
-		out.Items = append(out.Items, i)
-	}
-	slices.SortFunc(out.Items, func(a, b SessionBackup) int {
-		if n := b.Updated.Compare(a.Updated); n != 0 {
-			return n
-		}
-		return strings.Compare(a.ID, b.ID)
-	})
-	return out, nil
+	return errors.Join(errs...)
 }
 
 func backupEntryID(name, v string) string {
@@ -148,7 +216,11 @@ func listWebDAVSessionBackups(ctx context.Context, d *dav, parts []string) (map[
 		if pathpkg.Dir(p) != pathpkg.Clean(base.Path) {
 			continue
 		}
-		if id := backupEntryID(pathpkg.Base(p), parts[0]); id != "" {
+		id := backupEntryID(pathpkg.Base(p), parts[0])
+		if parts[0] == sessionDAVDir && pathpkg.Base(p) == currentSessionDir {
+			id = currentSessionID
+		}
+		if id != "" {
 			out[id], _ = http.ParseTime(e.Modified)
 		}
 	}
@@ -177,6 +249,9 @@ func DeleteSessionBackup(ctx context.Context, id, scope string) error {
 	}
 	switch scope {
 	case "local":
+		if id == currentSessionID {
+			return locked(func() error { return os.RemoveAll(currentStore(c, d).localRoot) })
+		}
 		if err := removeLocalSessionBackup(batchDir, id, false); err != nil {
 			return err
 		}
@@ -184,6 +259,11 @@ func DeleteSessionBackup(ctx context.Context, id, scope string) error {
 	case "webdav":
 		if c.FollowServer {
 			return errors.New("this computer follows the server and can only delete local session backups")
+		}
+		if id == currentSessionID {
+			if _, err := deleteDAVBackup(ctx, d, d.url(folder, sessionDAVDir, currentSessionDir)+"/"); err != nil {
+				return err
+			}
 		}
 		for _, dir := range []string{sessionDAVDir, batchDir} {
 			if _, err := deleteDAVBackup(ctx, d, d.url(folder, dir, id)+"/"); err != nil {

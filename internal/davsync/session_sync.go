@@ -181,7 +181,7 @@ func recordSessionSync(ctx context.Context, c Config, st *state, explicit bool, 
 	if status.Pending != "" {
 		result, err = resumeSessionBatch(ctx, c, status.Pending, remoteDir)
 		result.Failed = append(result.Failed, status.Failed...)
-		if errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, errChanged) {
 			status.Pending = ""
 		}
 	}
@@ -201,7 +201,7 @@ func recordSessionSync(ctx context.Context, c Config, st *state, explicit bool, 
 				}
 				req.Sources = append(req.Sources, failure.Source)
 			}
-			if status.Backup != "" {
+			if status.Backup != "" && status.Backup != currentSessionID {
 				req.Backups = []string{status.Backup}
 			}
 			if len(req.Sources) == 0 {

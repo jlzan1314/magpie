@@ -50,7 +50,7 @@ const plan = (token) => ({
   memory: { in: 2, up: 1 },
 });
 
-function serve(lang, posts) {
+function serve(lang, posts, remoteGate) {
   const theme = process.env.MAGPIE_TEST_THEME || "light";
   const settings = {
     theme, lang, tray: "panel", version: "test", dir: "/tmp/magpie",
@@ -90,7 +90,12 @@ function serve(lang, posts) {
       activity=activity.phase==="waiting" ? {phase:"done",latest:"example",last:minAgo,conversations:1,uploaded:0,skipped:2} : {phase:"waiting",retryAt:new Date(Date.now()+30000).toISOString(),canRetry:true};
       return json(activity);
     }
-    if (pathname === "/api/davsync/session-restore-choices") return json({items:[{id:"snapshot",ready:true,remoteReady:true,webdav:true,device:"Laptop",updated:minAgo,entries:[{id:"thread",title:"Restore fixture"}]}]});
+    if (pathname === "/api/davsync/session-restore-choices") {
+      const body=post();
+      if (body.scope==="webdav") await remoteGate;
+      if (body.scope) return json({items:body.scope==="local" ? [{id:"snapshot",local:true,updated:minAgo}] : [],canDeleteWebDAV:true});
+      return json({id:"snapshot",local:true,ready:!!body.verify,device:"Laptop",entries:[{id:"thread",title:"Restore fixture"}]});
+    }
     if (pathname === "/api/davsync/session-batch") {post();return json({conversations:1});}
     if (pathname === "/api/davsync/save") {
       const b = post();
@@ -141,7 +146,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const page = await (await browser.newContext({ viewport: { width, height: 800 }, reducedMotion: "reduce" })).newPage();
         const errors = [], posts = [];
         page.on("pageerror", (e) => errors.push(e.message));
-        await page.route("**/*", serve(lang, posts));
+        let releaseRemote;
+        const remoteGate = new Promise(resolve => {releaseRemote=resolve;});
+        t.after(releaseRemote);
+        await page.route("**/*", serve(lang, posts,remoteGate));
         t.after(async () => {
           if (process.env.ARTIFACT_DIR) {
             await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
@@ -301,6 +309,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const savedDraft = page.waitForResponse(response => response.status() === 204 &&
           response.url().endsWith("/api/davsync/session-preferences") &&
           response.request().postDataJSON()?.cwd === "/fixture/project");
+        assert.equal(await panel.getByRole("textbox", {name:w("Target project folder")}).count(),0);
+        await click(panel.locator(".session-batch-advanced > summary"));
         await panel.getByRole("textbox", { name: w("Target project folder") }).fill("/fixture/project");
         await savedDraft;
         await page.goto("http://magpie.test/?view=settings&tab=sync");
@@ -321,9 +331,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const manager=panel.locator(".session-batch-manager");
         await click(manager.locator("summary").first());
         await manager.getByText("Laptop · Restore fixture").waitFor();
+        assert.equal(all("/api/davsync/session-restore-choices").filter(x=>x.body.verify).length,0);
+        await click(manager.getByRole("button",{name:w("View backup"),exact:true}));
         await click(manager.getByText(w("Choose a conversation"),{exact:true}));
         await click(manager.getByRole("button",{name:"Restore fixture",exact:true}));
         await click(panel.getByRole("button",{name:w("Import"),exact:true}));
+        releaseRemote(); // the local restore was usable throughout a stalled remote listing
         const restore = await waitPosts("/api/davsync/session-batch",1);
         assert.deepEqual(restore.backups,["snapshot"]);
         assert.equal(restore.entry,"thread");

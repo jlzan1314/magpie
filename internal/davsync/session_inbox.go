@@ -104,12 +104,46 @@ func receiveSessionBackups(ctx context.Context, c Config, p SessionPreferences) 
 	dirty := false
 	imported := 0
 	var problems []error
+	hasCurrent := slices.ContainsFunc(list.Items, func(item SessionBackup) bool { return item.Current && item.WebDAV })
 	for _, item := range list.Items {
 		if ctx.Err() != nil {
 			problems = append(problems, ctx.Err())
 			break
 		}
-		if !item.WebDAV || receipts.Backups[item.ID] {
+		if item.Current && item.WebDAV {
+			cur := currentStore(c, d)
+			h, e := cur.readLibrary(ctx, true)
+			if e != nil {
+				problems = append(problems, e)
+				continue
+			}
+			for _, t := range h.Threads {
+				if ctx.Err() != nil {
+					problems = append(problems, ctx.Err())
+					break
+				}
+				if t.Origin == own || receipts.Entries[t.Revision] {
+					continue
+				}
+				entry, e := cur.readThread(ctx, t)
+				if e == nil && receiver == nil {
+					receiver, e = sessions.NewBatchReceiver(ctx, targets, p.Cwd)
+				}
+				if e == nil {
+					var n int
+					n, e = receiver.Receive(ctx, entry)
+					imported += n
+				}
+				if e != nil {
+					problems = append(problems, e)
+					continue
+				}
+				receipts.Entries[t.Revision] = true
+				dirty = true
+			}
+			continue
+		}
+		if hasCurrent || !item.WebDAV || receipts.Backups[item.ID] {
 			continue
 		}
 		store := batchStore{dav: d, passphrase: c.Passphrase, batchID: item.ID}

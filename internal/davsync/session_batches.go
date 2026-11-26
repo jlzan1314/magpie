@@ -11,9 +11,11 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/yetone/magpie/internal/backup"
@@ -49,14 +51,15 @@ type SessionBatchRequest struct {
 }
 
 type SessionBatchResult struct {
-	Backup        string                  `json:"backup,omitempty"`
-	Remote        bool                    `json:"remote"`
-	Conversations int                     `json:"conversations"`
-	Duplicates    int                     `json:"duplicates"`
-	Uploaded      int                     `json:"uploaded"`
-	Skipped       int                     `json:"skipped"`
-	Failed        []sessions.BatchFailure `json:"failed,omitempty"`
-	Imports       []sessions.BatchImport  `json:"imports,omitempty"`
+	selected      map[string]currentThread // revisions actually committed for an immediate import
+	Backup        string                   `json:"backup,omitempty"`
+	Remote        bool                     `json:"remote"`
+	Conversations int                      `json:"conversations"`
+	Duplicates    int                      `json:"duplicates"`
+	Uploaded      int                      `json:"uploaded"`
+	Skipped       int                      `json:"skipped"`
+	Failed        []sessions.BatchFailure  `json:"failed,omitempty"`
+	Imports       []sessions.BatchImport   `json:"imports,omitempty"`
 }
 
 type batchEntryInfo struct {
@@ -74,6 +77,8 @@ type batchManifest struct {
 }
 
 type batchStore struct {
+	headKey    string // device shard when reading the shared collection
+	current    bool   // stable shared DAV collection
 	localRoot  string
 	archive    fs.FS
 	dav        *dav
@@ -111,6 +116,52 @@ func runSessionBatch(ctx context.Context, c Config, req SessionBatchRequest, onP
 		return result, errors.New("choose one backup to restore a single conversation")
 	}
 	build := req.All || len(req.Sources) > 0 || len(req.Backups) > 1
+	loadBackup := func(name, entry string) ([]sessions.BatchConversation, error) {
+		if name == currentSessionID {
+			return currentStore(c, d).loadCurrent(ctx, entry)
+		}
+		return store.loadEntries(ctx, name, entry)
+	}
+	if build && !c.FollowServer {
+		var extra []sessions.BatchConversation
+		for _, id := range req.Backups {
+			if id == currentSessionID {
+				continue
+			}
+			entries, e := loadBackup(strings.TrimSpace(id), req.Entry)
+			if e != nil {
+				return result, e
+			}
+			extra = append(extra, entries...)
+		}
+		cur := currentStore(c, d)
+		// Manual requests and the scheduler can overlap in separate processes.
+		// Staging files are content addressed; the commit uses compare-and-swap.
+		result, err = cur.updateCurrent(ctx, req, extra, onPrepared)
+		if result.Remote && onPrepared == nil {
+			_ = writeBatchFile(batchHint(c), []byte(currentSessionID))
+		}
+		if err != nil || len(req.Targets) == 0 {
+			return result, err
+		}
+		var entries []sessions.BatchConversation
+		if slices.Contains(req.Backups, currentSessionID) {
+			entries, err = cur.loadCurrent(ctx, "")
+			if err != nil {
+				return result, err
+			}
+		} else {
+			for _, k := range slices.Sorted(maps.Keys(result.selected)) {
+				entry, e := cur.readThread(ctx, result.selected[k])
+				if e != nil {
+					return result, e
+				}
+				entries = append(entries, entry)
+			}
+		}
+		result.Imports, err = sessions.ImportBatch(ctx, sessions.MergeBatch(entries), req.Targets, strings.TrimSpace(req.Cwd))
+		return result, err
+	}
 	collect := sessions.CollectAvailableBatch
 	if onPrepared != nil {
 		collect = sessions.CollectOutgoingBatch
@@ -124,7 +175,7 @@ func runSessionBatch(ctx context.Context, c Config, req SessionBatchRequest, onP
 		return result, err
 	}
 	for _, name := range req.Backups {
-		old, err := store.loadEntries(ctx, strings.TrimSpace(name), req.Entry)
+		old, err := loadBackup(strings.TrimSpace(name), req.Entry)
 		if err != nil {
 			return result, err
 		}
@@ -381,7 +432,8 @@ func (s batchStore) publishObject(ctx context.Context, object batchObject, size 
 		}
 	}
 	if !*ready {
-		for _, dirs := range [][]string{{folder}, {folder, s.remoteDir}, {folder, s.remoteDir, s.batchID}} {
+		dirs := s.remoteObjectPath(kind, id)
+		for _, dirs := range [][]string{{folder}, {folder, dirs[0]}, {folder, dirs[0], dirs[1]}} {
 			if err := s.dav.ensureSessionCollection(ctx, dirs); err != nil {
 				return false, err
 			}
@@ -409,6 +461,9 @@ func (s batchStore) publishObject(ctx context.Context, object batchObject, size 
 
 func (s batchStore) receiptFile(kind, id string) string {
 	key := stateKey(Config{URL: s.url(kind, id), User: s.dav.user, Passphrase: s.passphrase})
+	if s.current {
+		return filepath.Join(s.localRoot, "verified", key)
+	}
 	return filepath.Join(settings.Dir(), batchDir, s.batchID, ".verified", key)
 }
 
@@ -522,6 +577,14 @@ func resumeSessionBatch(ctx context.Context, c Config, id, remoteDir string) (Se
 	d, err := newDAV(c)
 	if err != nil {
 		return result, err
+	}
+	cur := currentStore(c, d)
+	plan, e := cur.readPlan(id)
+	if e == nil {
+		return cur.commitPlan(ctx, plan)
+	}
+	if !errors.Is(e, fs.ErrNotExist) {
+		return result, e
 	}
 	s := batchStore{dav: d, passphrase: c.Passphrase, batchID: id, remoteDir: remoteDir}
 	raw, err := readBatchFile(s.filename("backups", id))
@@ -673,6 +736,9 @@ func (s batchStore) url(kind, id string) string {
 
 func (s batchStore) remoteObjectPath(kind, id string) []string {
 	parts := s.objectPath(kind, id)
+	if s.current {
+		parts[1] = currentSessionDir
+	}
 	if s.batchID != "" && s.remoteDir != batchDir {
 		parts[0] = sessionDAVDir
 		parts[2] = "session_" + parts[2]

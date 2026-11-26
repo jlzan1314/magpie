@@ -27,7 +27,7 @@ func TestSessionBatch(t *testing.T) {
 	fake := &fakeDAV{files: map[string][]byte{}, etags: map[string]string{}, dirs: map[string]bool{"/dav": true}}
 	var publishFailure atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if publishFailure.Load() && r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/session_manifest.sealed") {
+		if publishFailure.Load() && r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "session_manifest.sealed") {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -144,7 +144,7 @@ func TestSessionBatch(t *testing.T) {
 		t.Errorf("expected an object and a manifest, got %d files", len(fake.files))
 	}
 	for p, raw := range fake.files {
-		if !strings.HasPrefix(p, "/dav/magpie/sessions/"+first.Backup+"/session_") {
+		if !strings.HasPrefix(p, "/dav/magpie/sessions/"+currentSessionDir+"/") || !strings.HasPrefix(pathpkg.Base(p), "session_") {
 			t.Errorf("new backup used an unexpected WebDAV path: %s", p)
 		}
 		if bytes.Contains(raw, []byte(message)) {
@@ -165,19 +165,19 @@ func TestSessionBatch(t *testing.T) {
 	writeCodex("First result.")
 	sessions.Reset()
 	second, err := RunSessionBatch(ctx, SessionBatchRequest{Sources: picked[:1], Backups: []string{first.Backup}})
-	if err != nil || second.Conversations != 1 || second.Duplicates != 1 || second.Backup == first.Backup {
+	if err != nil || second.Conversations != 2 || second.Backup != first.Backup {
 		t.Fatalf("append merge: %+v, %v", second, err)
 	}
 	writeCodex("Different result.")
 	sessions.Reset()
 	publishFailure.Store(true)
 	blocked, err := RunSessionBatch(ctx, SessionBatchRequest{Sources: picked[:1], Backups: []string{second.Backup}, Targets: []string{"codex", "claude"}})
-	if err == nil || blocked.Backup == "" || len(blocked.Imports) != 0 || blocked.Conversations != 2 {
+	if err == nil || len(blocked.Imports) != 0 || blocked.Remote {
 		t.Fatalf("backup failed before distribution: %+v %v", blocked, err)
 	}
 	publishFailure.Store(false)
 	third, err := RunSessionBatch(ctx, SessionBatchRequest{Sources: picked[:1], Backups: []string{second.Backup}})
-	if err != nil || third.Backup != blocked.Backup || third.Conversations != 2 {
+	if err != nil || third.Backup != first.Backup || third.Conversations != 2 {
 		t.Fatalf("branch preservation and backup retry: %+v, %v", third, err)
 	}
 	useHome(to)
@@ -247,10 +247,12 @@ func TestSessionBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(third.Backup, true, false)
-	check(first.Backup, true, true)
+	if first.Backup != third.Backup {
+		t.Fatal("updates created separate DAV backups")
+	}
 	fake.mu.Lock()
 	for p := range fake.files {
-		if strings.Contains(p, "/"+third.Backup+"/") {
+		if strings.Contains(p, "/"+currentSessionDir+"/") {
 			t.Errorf("deleted WebDAV backup still contains %s", p)
 		}
 	}
@@ -265,7 +267,7 @@ func TestSessionBatch(t *testing.T) {
 	if err != nil || !big.Remote || big.Conversations != 1 {
 		t.Fatalf("long session upload: %+v, %v", big, err)
 	}
-	prefix := "/dav/" + folder + "/" + sessionDAVDir + "/" + big.Backup + "/"
+	prefix := "/dav/" + folder + "/" + sessionDAVDir + "/" + currentSessionDir + "/"
 	fake.mu.Lock()
 	for p, raw := range fake.files {
 		if strings.HasPrefix(p, prefix) && len(raw) >= 16<<20 {

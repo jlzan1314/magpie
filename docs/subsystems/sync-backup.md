@@ -270,25 +270,24 @@ conversation text and readable tool items. Cross-agent import replays that
 context in the destination format. Native provider state and hidden
 reasoning are outside the portable records.
 
-[RunSessionBatch](../../internal/davsync/session_batches.go) writes a local
-backup first. Each merged conversation is gzipped and encrypted with the
-existing sync passphrase. A manifest gives the backup its ID. There is no
-fixed size limit on a transcript. Large
-gzip streams are split into 8 MiB parts for new snapshots, each under the 64 MiB
-transport limit. A version 3 manifest records their order and content
-hashes. This format requires an updated reader. The reader also accepts
-earlier manifests. For a two-way WebDAV
-computer, the conversation objects are published before the manifest.
-New backups use `magpie/sessions/<backup-id>/` on WebDAV. The encrypted
-files use the `session_` prefix, with a separate object for each
-conversation or part. Existing WebDAV backups are read from their original
-collections. Interrupted uploads continue in their original collection.
-Magpie skips an object when its size and strong WebDAV ETag match a
-local receipt from a previously authenticated read of that object. It
-reads and verifies objects without a matching receipt. This also handles
-a lost PUT response. A server-side COPY into a new snapshot is verified
-at its destination. Servers without COPY receive a normal upload. Each backup owns its
-files and can be removed independently.
+WebDAV writers update **one current session backup** under
+`magpie/sessions/current/`. Its public backup ID stays the same. Each device
+owns a small authenticated manifest in `heads/`, lists only its own native
+sources there, and publishes it after verifying all new compressed, encrypted
+objects. Receivers read the union of the device manifests. Concurrent devices
+therefore cannot replace one another's conversations. Within one device an
+update checks the previous revision. An upload interrupted before the manifest
+commit leaves the previous complete session readable.
+
+A settled, file-backed Codex or Claude conversation can be skipped using its
+verified source stamp. Other readers compare the portable transcript. Appending
+to a conversation reuses its previously verified prefix and uploads only the
+new turns. A rewrite replaces the current revision of that source. Large pieces
+are split into encrypted parts. Restoring the conversation joins its pieces
+in order and verifies the checksum of the complete transcript. Equal histories
+are listed once; distinct device histories remain recoverable. Old immutable
+snapshots remain readable by ID and under **Older backups**. Upgrading does
+not delete them.
 
 The **Back up readable sessions on WebDAV sync** setting enables periodic backup of readable
 local conversations. The CLI equivalent is `magpie webdav set sessions=yes`.
@@ -316,39 +315,26 @@ has its own manifest containing only the successful entries. Retrying a
 failed source merges it with the previously backed-up conversations.
 Connection-wide failures keep the prepared snapshot for the next run.
 
-**Recoverable backups** pages through local and WebDAV snapshots by date.
-Before offering a restore, it authenticates the manifest and checks that
-the referenced files exist. Import verifies their contents. New encrypted
-manifests include the source hostname and conversation titles; older
-manifests remain usable. Choose a snapshot or one conversation, select a
-target Agent and import. Picking a backup clears the live source selection.
-The picker also allows deleting a local or remote backup. WebDAV deletion
-requires two-way sync. V1 shared objects remain after deleting a V1 manifest.
+**Recoverable backups** displays the local index as soon as it is read and
+fetches the three supported WebDAV directory listings concurrently. The
+index does not open session objects. The visible legacy rows load lightweight
+title previews with at most two in flight. Opening a backup checks its
+manifest and referenced files before enabling restore. Conversation controls
+are created on demand and searched within the selected backup. Refresh and
+close cancel outstanding listing requests.
 
-The batch panel shows the configured WebDAV backup interval. Select one or
-more destination agents and enable **Import remote sessions into selected
-agents on WebDAV sync** to receive conversations during an ordinary sync
-or a scheduled sync, including on a computer set to follow the server.
-These choices belong to this device and the configured WebDAV account.
-The first sync takes the newest published snapshot from each other device.
-Snapshots tied on timestamp or without a server timestamp are considered together.
-Subsequent syncs check new snapshots. Receipts are scoped to the server,
-targets and project directory. An interrupted import is retried and reuses
-any native sessions already written. A missing manifest is checked again
-after the sender finishes. Older backups without an identifiable source
-remain available through the restore picker.
-
-Set a project directory to place received sessions together. With no
-override, automatic import uses the original directory if it exists here,
-and the receiving user's home otherwise. Automatic uploads exclude unchanged
-copies created by import. Continuing one of those conversations makes its
-edited history eligible for the next upload.
+The batch panel shows the WebDAV interval. On a receiving computer, enable
+**Import remote sessions into selected agents on WebDAV sync** and select
+the destination agents. After the current backup exists, the receiver reads
+its device manifests and imports new authenticated revisions. Older snapshots
+are available manually. A missing project folder defaults to the receiving
+user's home. **Advanced** exposes the optional project override for manual
+and automatic imports; an existing override is shown on open.
 
 Native import runs after backup, into the chosen Codex and Claude Code
 stores in parallel. Each target returns its new session ID and resume
 command. An identical session already in the target project is reused when
-Magpie can read it. A repeated import also reuses its earlier native session. Supply a target project folder
-when the source folder is unavailable on the recipient. A failed import can
+Magpie can read it. A repeated import also reuses its earlier native session. Use a project override to place conversations in a particular folder. A failed import can
 be retried from the backup ID.
 
 ```sh
@@ -430,8 +416,11 @@ clock.
   conversations on the same schedule and through **Back up now**, even
   offline. Set a local backup passphrase. Each version has its own
   `session_<version>.zip` companion beside the settings JSON, containing
-  the same compressed, individually sealed objects as a WebDAV snapshot.
-  Copy both files to move a backup. Session-only changes produce a new
+  an encrypted manifest referring to shared sealed files in the nearby
+  `session_objects/` folder. New local versions store only changed session
+  content; restored sessions are complete. Copy the backup folder, including
+  the settings JSON, companion ZIP and object folder to move the backup.
+  Self-contained ZIPs from earlier releases remain readable. Session-only changes produce a new
   version. Keep and delete apply to the companion too. On a version with
   sessions, **Restore sessions…** lets the user select Codex, Claude Code,
   or both, an optional target project and the original passphrase. Existing
