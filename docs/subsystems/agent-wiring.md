@@ -67,6 +67,12 @@ Magpie again. The Agent's main switch can disable or re-enable Codex
 without changing its account mode. Existing native-account settings are
 treated as enabled. Each WSL instance keeps its own choice.
 
+When Codex uses `custom` as an alias for its native OpenAI account,
+both modes keep that provider ID. Magpie points the existing provider
+table at its gateway and saves the original connection settings. **Use
+native account** restores those settings, including an omitted base URL.
+Threads tagged `custom` can be resumed in either mode.
+
 `magpie codex native-account on` also enables Codex in native mode.
 `magpie codex native-account off` switches an enabled Codex to the
 Magpie route.

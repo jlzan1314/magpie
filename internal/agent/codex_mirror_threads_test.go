@@ -51,10 +51,9 @@ func TestCodexMirrorThreadsFollowOpenAI(t *testing.T) {
 	}
 }
 
-// The mirror at the top when a magpie model is picked: magpie takes it
-// down and Codex goes on OpenAI, so its threads go to OpenAI, and back to
-// the mirror at the Disconnect, which puts it back on top.
-func TestCodexMirrorAtTopJoinsWithItsThreads(t *testing.T) {
+// The active custom mirror keeps its ID when a model is picked through
+// Magpie. Historical OpenAI threads follow it as they do in native mode.
+func TestCodexMirrorAtTopRetainsItsThreads(t *testing.T) {
 	const (
 		theirs = "019a0000-0000-7000-8000-0000000000a3"
 		own    = "019a0000-0000-7000-8000-0000000000a4"
@@ -71,10 +70,10 @@ func TestCodexMirrorAtTopJoinsWithItsThreads(t *testing.T) {
 	if err := cx.Sync(); err != nil {
 		t.Fatal(err)
 	}
-	if p, _ := edit.GetTOMLTop(cfgPath, "model_provider"); p != "" {
-		t.Fatalf("model_provider %q, want the mirror taken down:\n%s", p, read())
+	if p, _ := edit.GetTOMLTop(cfgPath, "model_provider"); p != "custom" {
+		t.Fatalf("model_provider %q, want custom:\n%s", p, read())
 	}
-	for id, want := range map[string]string{theirs: "openai", own: "openai"} {
+	for id, want := range map[string]string{theirs: "custom", own: "custom"} {
 		if p := codexRowOn(t, dir, id); p != want {
 			t.Errorf("beside: thread %s on %q, want %q", id, p, want)
 		}
@@ -83,7 +82,7 @@ func TestCodexMirrorAtTopJoinsWithItsThreads(t *testing.T) {
 		t.Fatal(err)
 	}
 	if p, _ := edit.GetTOMLTop(cfgPath, "model_provider"); p != "custom" {
-		t.Fatalf("model_provider %q after the Disconnect, want the mirror back:\n%s", p, read())
+		t.Fatalf("model_provider %q after the Disconnect, want custom:\n%s", p, read())
 	}
 	if p := codexRowOn(t, dir, theirs); p != "custom" {
 		t.Errorf("after the Disconnect: the mirror's thread on %q, want custom", p)
