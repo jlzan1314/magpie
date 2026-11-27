@@ -250,7 +250,7 @@ it does, and take it back.
 
 ## Backing up and importing selected sessions
 
-In **Settings → Sync and backup → Batch session backup and import**, select
+In **Settings → Sync and backup → Session sync**, select
 individual sessions or **All readable sessions**. The picker uses the same
 native transcript readers and session access choices as Sessions. Search
 the list or use the source Agent menu to narrow the selection. The first
@@ -289,9 +289,9 @@ are listed once; distinct device histories remain recoverable. Old immutable
 snapshots remain readable by ID and under **Older backups**. Upgrading does
 not delete them.
 
-The **Back up readable sessions on WebDAV sync** setting enables periodic backup of readable
+The **Sync readable sessions** setting enables periodic backup of readable
 local conversations. The CLI equivalent is `magpie webdav set sessions=yes`.
-Use `magpie webdav sessions sync` for an immediate check. The result counts
+On a two-way WebDAV device, **Sync sessions now** on the **Session sync** row starts an immediate sync of readable local sessions. The CLI equivalent is `magpie webdav sessions sync`. The result counts
 uploaded and skipped files, including the manifest. An interrupted session
 sync resumes the prepared local snapshot on the next run and skips objects
 already uploaded to the same backup. New local changes are captured on a

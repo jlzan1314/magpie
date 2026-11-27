@@ -48,7 +48,7 @@ window.davForm = function (v) {
   const [profL, prof] = tick(t("Profiles"), v.profiles !== false);
   // usage: off unless picked, each computer its own (#542)
   const [useL, use] = tick(t("Usage: this computer's calls, for the Usage page on the others"), !!v.usage);
-  const [sessL, sess] = tick(t("Back up readable sessions on WebDAV sync"), !!v.sessions);
+  const [sessL, sess] = tick(t("Sync readable sessions"), !!v.sessions);
   // sign-ins: off unless picked, sealed with the passphrase like the rest
   // (qianxunji, curtinp118 on Discord); what it lets in is said beside it
   const [siL, si] = tick(t("Sign-ins: subscription accounts and plugin sign-ins"), !!v.signIns);
@@ -589,7 +589,7 @@ window.askPreviewRows = function (at, v, sub) {
 
 function sessionTransferRows(at, v, row) {
   const cards = [
-    ["Batch session backup and import", "Merge selected conversations, back them up, and import into the agents you choose.", window.sessionBatchForm],
+    ["Session sync", "Sync local session changes to WebDAV or import conversations into selected agents.", window.sessionBatchForm],
     ["Codex session transfer", "Transfer one compressed and encrypted conversation by ID.", window.codexSessionForm],
   ];
   for (const [index, [title, subtitle, form]] of cards.entries()) {
@@ -598,13 +598,18 @@ function sessionTransferRows(at, v, row) {
     button.type = "button";
     let tracker;
     button.onclick = () => {
-      if (panel.firstChild) panel.replaceChildren();
-      else panel.append(form(!!v.followServer, tracker, v));
+      if (panel.firstChild) {
+        panel.replaceChildren();
+        tracker?.setFormBlocked(false);
+      } else panel.append(form(!!v.followServer, tracker, v));
       button.textContent = t(panel.firstChild ? "Close" : "Open");
     };
     const heading = row(t(title), t(subtitle), button, "sync-session-row");
     if (index === 0) {
-      tracker = sessionActivityLine(heading.querySelector(".who"), v, id => {
+      const sync = el("button", "text", t("Sync sessions now"));
+      sync.type = "button";
+      if (!v.followServer) button.before(sync);
+      tracker = sessionActivityLine(heading.querySelector(".who"), v, sync, id => {
         if (!panel.firstChild) button.click();
         panel.firstChild.useSessionBackup(id);
       });
@@ -613,7 +618,7 @@ function sessionTransferRows(at, v, row) {
   }
 }
 
-function sessionActivityLine(at, initial, restore) {
+function sessionActivityLine(at, initial, sync, restore) {
   const note = el("div", "sub wraps say");
   note.setAttribute("role", "status");
   const last = el("button", "text");
@@ -626,22 +631,24 @@ function sessionActivityLine(at, initial, restore) {
   last.hidden = retry.hidden = true;
   const imported = el("div", "sub wraps");
   at.append(note, imported, last, retry, failures);
-  let timer, notifyForm, revision = 0, previousFailures = "", active = false;
+  let timer, revision = 0, previousFailures = "", active = false;
+  let starting = false, formBlocked = false;
+  const updateButton = () => { sync.disabled = starting || active || formBlocked; };
   const paint = a => {
     active = ["preparing", "uploading", "waiting", "importing"].includes(a.phase);
-    notifyForm?.();
+    updateButton();
     const bad = a.error || "";
     const remaining = Math.max(0, Math.ceil((Date.parse(a.retryAt) - Date.now()) / 1000));
     let words = "";
-    if (a.phase === "preparing") words = t("Preparing session backup…");
+    if (a.phase === "preparing") words = t("Preparing session sync…");
     else if (a.phase === "waiting") words = t("Waiting to retry in {n} s", { n: remaining });
     else if (a.phase === "uploading") words = t("Verified {done} of {count} files · {size} of {total}", { done: a.objects, count: a.count, size: fmtBytes(a.bytes), total: fmtBytes(a.total) });
     else if (a.phase === "importing") words = t("Importing remote sessions…");
     else if (bad) words = tNotice(bad);
     else if (a.phase === "pending") words = t("Session backup upload was interrupted. The next sync will resume it.");
-    else if (a.phase === "partial") words = t("{n} conversations backed up", { n: a.conversations });
+    else if (a.phase === "partial") words = t("{n} conversations synced", { n: a.conversations });
     else if (a.phase === "done" && a.skipped && !a.uploaded) words = t("Remote files match packed size · skipped {skipped}", { skipped: a.skipped });
-    else if (a.phase === "done") words = t("{n} conversations backed up", { n: a.conversations });
+    else if (a.phase === "done") words = t("{n} conversations synced", { n: a.conversations });
     if (a.phase === "uploading" && a.sending > 0)
       words += " · " + t("Sending {size}", { size: fmtBytes(a.sending) });
     if (note.textContent !== words) note.textContent = words;
@@ -705,7 +712,20 @@ function sessionActivityLine(at, initial, restore) {
   };
   paint({ phase: "idle", error: initial.sessionsError });
   timer = setTimeout(poll, 0);
-  return { start, get busy() { return active; }, onChange(fn) { notifyForm = fn; } };
+  sync.onclick = async () => {
+    if (sync.disabled) return;
+    starting = true;
+    updateButton();
+    try {
+      if (await confirmAction(t("All readable sessions"),
+        t("The selected conversations may include private source code, prompts and tool output. Each backup is encrypted."),
+        t("Sync sessions now"))) await start({});
+    } finally {
+      starting = false;
+      updateButton();
+    }
+  };
+  return { setFormBlocked(blocked) { formBlocked = blocked; updateButton(); } };
 }
 
 window.codexSessionForm = function (followsServer) {
@@ -810,12 +830,10 @@ window.sessionBatchForm = function (followsServer, tracker, sync) {
   destinations.setAttribute("aria-label", t("Import into agents"));
   const backup = el("button", "text", t("Back up"));
   const distribute = el("button", "text primary", t("Back up and import"));
-  const syncChanges = el("button", "text", t("Sync local changes"));
-  backup.type = distribute.type = syncChanges.type = "button";
+  backup.type = distribute.type = "button";
   const output = el("div", "done session-batch-output sub wraps");
   output.setAttribute("role", "status");
   const actions = el("div", "bar");
-  if (!followsServer) actions.append(syncChanges);
   actions.append(backup, distribute);
   let entry = "", entryTitle = "", pendingRestore;
   const selection = el("div", "hint");
@@ -837,7 +855,7 @@ window.sessionBatchForm = function (followsServer, tracker, sync) {
   form.useSessionBackup = chooseBackup;
   back.oninput = () => { entry = entryTitle = ""; };
   const autoImport = batchTick(t("Import remote sessions into selected agents on WebDAV sync"));
-  const schedule = sync.sessions && !followsServer && sync.auto ? t("Session backup every {n} min", {n: sync.auto}) : t("Automatic WebDAV session backup is off");
+  const schedule = sync.sessions && !followsServer && sync.auto ? t("Sync local sessions every {n} min", {n: sync.auto}) : t("Automatic sync of local sessions is off");
   const manager = sessionBackupManager(chooseBackup);
   manager.open = followsServer;
   form.append(...field(t("Sessions"), sources),
@@ -874,7 +892,7 @@ window.sessionBatchForm = function (followsServer, tracker, sync) {
     backup.disabled = working || !ready;
     distribute.textContent = ids().length && !selectingAll() && !chosen().length ? t("Import") : t("Back up and import");
     distribute.disabled = working || !ready || targets.every(c => !c.input.checked);
-    syncChanges.disabled = working || tracker.busy || choices.length === 0;
+    if (form.isConnected) tracker.setFormBlocked(working || !loaded || !choices.length);
     sourceList.hidden = all.input.checked && (!loaded || choices.length !== 0);
     all.input.disabled = !loaded || !choices.length;
     agentPick.disabled = !loaded || all.input.checked || sourceAgents.length === 0;
@@ -887,7 +905,6 @@ window.sessionBatchForm = function (followsServer, tracker, sync) {
       c.label.hidden = !c.text.includes(needle) || (sourceAgent && c.ref.agent !== sourceAgent);
     }
   }
-  tracker.onChange(() => { if (form.isConnected) update(); });
   form.addEventListener("input", changed);
   search.addEventListener("input", filter);
   update();
@@ -950,7 +967,7 @@ window.sessionBatchForm = function (followsServer, tracker, sync) {
     output.classList.remove("bad");
     try {
       if ((req.all || req.sources.length) && !await confirmAction(
-        t("Batch session backup and import"),
+        t("Session sync"),
         t("The selected conversations may include private source code, prompts and tool output. Each backup is encrypted."),
         t("Back up"))) return;
       output.textContent = t("Working…");
@@ -967,26 +984,6 @@ window.sessionBatchForm = function (followsServer, tracker, sync) {
   }
   backup.onclick = () => run(false);
   distribute.onclick = () => run(true);
-  syncChanges.onclick = async () => {
-    working = true;
-    update();
-    output.replaceChildren();
-    output.classList.remove("bad");
-    try {
-      if (!await confirmAction(t("All readable sessions"),
-        t("The selected conversations may include private source code, prompts and tool output. Each backup is encrypted."),
-        t("Sync local changes"))) return;
-      output.textContent = t("Working…");
-      await tracker.start({});
-      output.replaceChildren();
-    } catch (err) {
-      output.replaceChildren();
-      showBatchFailure(output, err.message);
-    } finally {
-      working = false;
-      update();
-    }
-  };
   return form;
 };
 
