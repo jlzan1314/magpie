@@ -127,7 +127,7 @@ func runSessionBatch(ctx context.Context, c Config, req SessionBatchRequest, onP
 	build := req.All || len(req.Sources) > 0 || len(req.Backups) > 1
 	loadBackup := func(name, entry string) ([]sessions.BatchConversation, error) {
 		if name == currentSessionID {
-			return currentStore(c, d).loadCurrent(ctx, entry)
+			return currentStore(c, d).loadCurrent(ctx, entry, req.Current)
 		}
 		return store.loadEntries(ctx, name, entry)
 	}
@@ -155,7 +155,7 @@ func runSessionBatch(ctx context.Context, c Config, req SessionBatchRequest, onP
 		}
 		var entries []sessions.BatchConversation
 		if slices.Contains(req.Backups, currentSessionID) {
-			entries, err = cur.loadCurrent(ctx, "")
+			entries, err = cur.loadCurrent(ctx, "", req.Current)
 			if err != nil {
 				return result, err
 			}

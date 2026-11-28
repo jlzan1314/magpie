@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/yetone/magpie/internal/backup"
 	"github.com/yetone/magpie/internal/sessions"
@@ -56,6 +57,7 @@ type sessionLibrary struct {
 }
 
 const sessionLibraryFormat = "magpie-current-sessions-1"
+const sessionReceiveLimit = 200
 
 func newSessionLibrary() sessionLibrary {
 	return sessionLibrary{Format: sessionLibraryFormat, Threads: map[string]currentThread{}}
@@ -329,7 +331,26 @@ func (s batchStore) readThread(ctx context.Context, t currentThread) (sessions.B
 func (h sessionLibrary) visible() []string {
 	return slices.Sorted(maps.Keys(h.Threads))
 }
-func (s batchStore) loadCurrent(ctx context.Context, entry string) ([]sessions.BatchConversation, error) {
+
+func (h sessionLibrary) recentKeys() []string {
+	keys := slices.Collect(maps.Keys(h.Threads))
+	activity := func(key string) time.Time {
+		meta := h.Threads[key].Meta
+		if meta.Last.IsZero() {
+			return meta.Start
+		}
+		return meta.Last
+	}
+	slices.SortFunc(keys, func(a, b string) int {
+		if order := activity(b).Compare(activity(a)); order != 0 {
+			return order
+		}
+		return strings.Compare(a, b)
+	})
+	return keys[:min(len(keys), sessionReceiveLimit)]
+}
+
+func (s batchStore) loadCurrent(ctx context.Context, entry string, recentOnly bool) ([]sessions.BatchConversation, error) {
 	head, err := s.readLibrary(ctx, true)
 	if err != nil || len(head.Threads) == 0 {
 		if errors.Is(err, backup.ErrPassphrase) || ctx.Err() != nil {
@@ -345,11 +366,19 @@ func (s batchStore) loadCurrent(ctx context.Context, entry string) ([]sessions.B
 		head = cached
 		s.dav = nil // restore a verified local copy offline
 	}
-	var out []sessions.BatchConversation
-	for _, key := range slices.Sorted(maps.Keys(head.Threads)) {
-		if entry != "" && entry != key {
-			continue
+	var keys []string
+	switch {
+	case entry != "":
+		if _, ok := head.Threads[entry]; ok {
+			keys = []string{entry}
 		}
+	case recentOnly:
+		keys = head.recentKeys()
+	default:
+		keys = head.visible()
+	}
+	out := make([]sessions.BatchConversation, 0, len(keys))
+	for _, key := range keys {
 		c, err := s.readThread(ctx, head.Threads[key])
 		if err != nil {
 			return nil, err

@@ -6,16 +6,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/yetone/magpie/internal/backup"
 	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/sessions"
+	"github.com/yetone/magpie/internal/steady"
 )
 
 func TestAutomaticBackupsCarryEncryptedSessionsOffline(t *testing.T) {
@@ -187,6 +191,172 @@ func TestScheduledWebDAVImportsAndSkipsReturnedSessions(t *testing.T) {
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("edited import not exportable: %d %v", len(entries), err)
 	}
+}
+
+func TestScheduledWebDAVImportsOnlyRecentSessions(t *testing.T) {
+	skipSessionFixtureFlushes(t)
+	fake := newSizeAwareDAV()
+	var downloads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/current/threads/") {
+			downloads.Add(1)
+		}
+		fake.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+	config := Config{URL: server.URL + "/dav", User: "me", Password: "pw", Passphrase: "recent sessions"}
+	source, dest := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", dest)
+	t.Setenv("USERPROFILE", dest)
+	ctx := context.Background()
+	prefs := SessionPreferences{AutoImport: true, Targets: []string{"codex"}}
+	dav, err := newDAV(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publish := func(entries []sessions.BatchConversation) {
+		t.Helper()
+		backupTestHome(t, source, config)
+		if _, err := currentStore(config, dav).updateCurrent(ctx, SessionBatchRequest{}, entries, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	receive := func(want int) {
+		t.Helper()
+		backupTestHome(t, dest, config)
+		if n, err := receiveSessionBackups(ctx, config, prefs); err != nil || n != want {
+			t.Fatalf("imported %d sessions, wanted %d: %v", n, want, err)
+		}
+		sessions.Reset()
+	}
+	previous := recentSyncFixture(0)
+	publish([]sessions.BatchConversation{previous})
+	receive(1)
+	before := sessions.BatchCandidates()
+	if len(before) != 1 {
+		t.Fatalf("first sync left %d native sessions", len(before))
+	}
+
+	previous.Last = previous.Start.Add(time.Second)
+	previous.Parts = append(previous.Parts, sessions.Part{Role: "assistant", Kind: "text", Text: "outside the window"})
+	entries := []sessions.BatchConversation{previous}
+	for index := 1; index <= 201; index++ {
+		entries = append(entries, recentSyncFixture(index))
+	}
+	entries[2].Last = time.Time{}
+	publish(entries)
+	backupTestHome(t, dest, config)
+	rememberSessionRevisions(t, entries[3:201])
+	downloads.Store(0)
+	receive(2)
+	if got := downloads.Load(); got != 2 {
+		t.Fatalf("downloaded %d session payloads, wanted the two unseen revisions inside the 200-session window", got)
+	}
+	candidates := sessions.BatchCandidates()
+	if len(candidates) != 3 {
+		t.Fatalf("unexpected session window: %d native sessions", len(candidates))
+	}
+	for _, candidate := range candidates {
+		if candidate.Title == entries[1].Title {
+			t.Fatal("a session outside the window displaced a newer creation without activity")
+		}
+	}
+	old, _, err := sessions.CollectAvailableBatch(ctx, []sessions.BatchSource{before[0].BatchSource}, false)
+	if err != nil || len(old) != 1 || len(old[0].Parts) != 1 {
+		t.Fatalf("sync changed a previously imported session outside the window: %v", err)
+	}
+	downloads.Store(0)
+	receive(0)
+	if got := downloads.Load(); got != 0 {
+		t.Fatalf("unchanged sync downloaded %d payloads or backfilled older sessions", got)
+	}
+}
+
+func recentSyncFixture(index int) sessions.BatchConversation {
+	stamp := time.Date(2026, time.November, 25, 10, index, 0, 0, time.UTC)
+	title := fmt.Sprintf("Remote conversation %03d", index)
+	return sessions.BatchConversation{
+		Sources: []sessions.BatchSource{{Agent: "codex", ID: fmt.Sprintf("0196ce3b-81fc-7000-8000-%012x", index)}},
+		Title:   title,
+		Start:   stamp,
+		Last:    stamp,
+		Parts:   []sessions.Part{{Role: "user", Kind: "text", Text: title}},
+	}
+}
+
+func TestScheduledWebDAVLegacyWindowDoesNotBackfill(t *testing.T) {
+	skipSessionFixtureFlushes(t)
+	fake := newSizeAwareDAV()
+	server := httptest.NewServer(fake)
+	defer server.Close()
+	config := Config{URL: server.URL + "/dav", User: "me", Password: "pw", Passphrase: "recent legacy sessions"}
+	source, dest := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", dest)
+	t.Setenv("USERPROFILE", dest)
+	ctx := context.Background()
+	prefs := SessionPreferences{AutoImport: true, Targets: []string{"codex"}}
+	backupTestHome(t, dest, config)
+	if n, err := receiveSessionBackups(ctx, config, prefs); err != nil || n != 0 {
+		t.Fatalf("empty WebDAV sync imported %d sessions: %v", n, err)
+	}
+	backupTestHome(t, source, config)
+	dav, err := newDAV(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := batchStore{dav: dav, passphrase: config.Passphrase}
+	var entries []sessions.BatchConversation
+	for index := 0; index < 202; index++ {
+		entries = append(entries, recentSyncFixture(index))
+	}
+	if _, stats, err := store.save(ctx, entries, true, batchPartSize); err != nil || len(stats.failed) != 0 {
+		t.Fatalf("publishing legacy fixture: %v", err)
+	}
+	backupTestHome(t, dest, config)
+	rememberSessionRevisions(t, entries[:198])
+	if n, err := receiveSessionBackups(ctx, config, prefs); err != nil || n != 2 {
+		t.Fatalf("legacy sync imported %d sessions, wanted the two unseen revisions inside the window: %v", n, err)
+	}
+	if n, err := receiveSessionBackups(ctx, config, prefs); err != nil || n != 0 {
+		t.Fatalf("legacy sync backfilled %d sessions: %v", n, err)
+	}
+}
+
+func rememberSessionRevisions(t *testing.T, entries []sessions.BatchConversation) {
+	t.Helper()
+	files, err := filepath.Glob(path("session-inbox-*.json"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("found %d session receipt files: %v", len(files), err)
+	}
+	var receipts inboxReceipts
+	raw, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &receipts); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		raw, err := json.Marshal(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		receipts.Entries[batchDigest(raw)] = true
+	}
+	raw, err = json.Marshal(receipts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(files[0], raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func skipSessionFixtureFlushes(t *testing.T) {
+	t.Helper()
+	flush := steady.Sync
+	steady.Sync = func(*os.File) error { return nil }
+	t.Cleanup(func() { steady.Sync = flush })
 }
 
 func TestScheduledWebDAVOverwritesSharedSessionAndKeepsCreationTime(t *testing.T) {

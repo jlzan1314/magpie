@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/yetone/magpie/internal/filelock"
@@ -96,10 +95,13 @@ func receiveSessionBackups(ctx context.Context, c Config, p SessionPreferences) 
 	if receipts.Backups == nil || receipts.Entries == nil {
 		return 0, errors.New("invalid session import receipts")
 	}
-	// Restoring an old backup updates its local mtime. Use the server's
-	// collection date for initial selection, keeping ties and undated rows.
-	slices.SortStableFunc(list.Items, func(a, b SessionBackup) int { return b.remoteTime.Compare(a.remoteTime) })
-	newest := map[string]time.Time{}
+	slices.SortFunc(list.Items, func(a, b SessionBackup) int {
+		if order := b.remoteTime.Compare(a.remoteTime); order != 0 {
+			return order
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	seenLegacy := map[string]bool{}
 	var receiver *sessions.BatchReceiver
 	dirty := false
 	imported := 0
@@ -117,11 +119,12 @@ func receiveSessionBackups(ctx context.Context, c Config, p SessionPreferences) 
 				problems = append(problems, e)
 				continue
 			}
-			for _, t := range h.Threads {
+			for _, key := range h.recentKeys() {
 				if ctx.Err() != nil {
 					problems = append(problems, ctx.Err())
 					break
 				}
+				t := h.Threads[key]
 				if receipts.Entries[t.Revision] {
 					continue
 				}
@@ -143,18 +146,18 @@ func receiveSessionBackups(ctx context.Context, c Config, p SessionPreferences) 
 			}
 			continue
 		}
-		if hasCurrent || !item.WebDAV || receipts.Backups[item.ID] {
+		if hasCurrent || !item.WebDAV {
 			continue
+		}
+		if len(seenLegacy) == sessionReceiveLimit {
+			break
 		}
 		store := batchStore{dav: d, passphrase: c.Passphrase, batchID: item.ID}
 		// An upload can have a collection before its verified manifest.
-		raw, e := store.remote(ctx, "backups", item.ID)
+		var m batchManifest
+		e := loadBatchObject(ctx, &store, "backups", item.ID, &m)
 		if errors.Is(e, errSessionBackupMissing) {
 			continue
-		}
-		var m batchManifest
-		if e == nil {
-			e = store.open(raw, item.ID, &m)
 		}
 		if e != nil {
 			problems = append(problems, e)
@@ -169,15 +172,20 @@ func receiveSessionBackups(ctx context.Context, c Config, p SessionPreferences) 
 			source = m.Device
 		}
 		foreign := source != "" && source != own && !(m.Origin == "" && m.Device == host)
-		if foreign && (receipts.Started || item.remoteTime.IsZero() || !item.remoteTime.Before(newest[source])) {
+		if foreign {
 			complete := true
 			for _, key := range m.Entries {
-				if receipts.Entries[key] {
+				if seenLegacy[key] {
+					complete = complete && (receipts.Backups[item.ID] || receipts.Entries[key])
 					continue
 				}
-				if ctx.Err() != nil {
+				if len(seenLegacy) == sessionReceiveLimit || ctx.Err() != nil {
 					complete = false
 					break
+				}
+				seenLegacy[key] = true
+				if receipts.Backups[item.ID] || receipts.Entries[key] {
+					continue
 				}
 				entry, e := store.readEntry(ctx, m, key)
 				if e == nil && receiver == nil {
@@ -199,12 +207,11 @@ func receiveSessionBackups(ctx context.Context, c Config, p SessionPreferences) 
 			if !complete {
 				continue
 			}
-			if item.remoteTime.After(newest[source]) {
-				newest[source] = item.remoteTime
-			}
 		}
-		receipts.Backups[item.ID] = true
-		dirty = true
+		if !receipts.Backups[item.ID] {
+			receipts.Backups[item.ID] = true
+			dirty = true
+		}
 	}
 	if !receipts.Started && len(problems) == 0 {
 		receipts.Started = true
