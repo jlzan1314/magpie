@@ -590,6 +590,9 @@ func carryStamp(at, now time.Time) string {
 	if at.IsZero() {
 		at = now
 	}
+	if at.Nanosecond()%int(time.Millisecond) != 0 {
+		return at.UTC().Format(time.RFC3339Nano)
+	}
 	return at.UTC().Format("2006-01-02T15:04:05.000Z")
 }
 
@@ -698,6 +701,10 @@ func writeClaudeCarryID(cwd string, items []carryItem, now time.Time, id string)
 		return CarryResult{}, err
 	}
 	path := filepath.Join(ClaudeDir(), "projects", name, id+".jsonl")
+	return CarryResult{Agent: "claude", ID: id, Path: path}, writeNew(path, claudeCarryLines(cwd, items, now, id))
+}
+
+func claudeCarryLines(cwd string, items []carryItem, now time.Time, id string) [][]byte {
 	version := agentVersion("claude")
 	if version == "" {
 		version = "2.0.0"
@@ -764,7 +771,7 @@ func writeClaudeCarryID(cwd string, items []carryItem, now time.Time, id string)
 				"sourceToolAssistantUUID", by)
 		}
 	}
-	return CarryResult{Agent: "claude", ID: id, Path: path}, writeNew(path, lines)
+	return lines
 }
 
 // ord is a JSON object whose fields are written in the order given, as the
@@ -839,16 +846,29 @@ func writeCodexCarry(home, cwd string, items []carryItem, now time.Time) (CarryR
 }
 
 func writeCodexCarryID(home, cwd string, items []carryItem, now time.Time, id string) (CarryResult, error) {
-	path := filepath.Join(home, "sessions", now.Format("2006"), now.Format("01"), now.Format("02"),
+	path := filepath.Join(home, "sessions", codexCarryPath(now, id))
+	return CarryResult{Agent: "codex", ID: id, Path: path}, writeNew(path, codexCarryLines(home, cwd, items, now, id))
+}
+
+func codexCarryPath(now time.Time, id string) string {
+	return filepath.Join(now.Format("2006"), now.Format("01"), now.Format("02"),
 		"rollout-"+now.Format("2006-01-02T15-04-05")+"-"+id+".jsonl")
+}
+
+func codexCarryLines(home, cwd string, items []carryItem, now time.Time, id string) [][]byte {
 	version := agentVersion("codex")
 	if version == "" {
 		version = "0.0.0"
 	}
 	stamp := carryStamp(now, now)
-	lines := [][]byte{jsonLine(o("timestamp", stamp, "type", "session_meta", "payload", o(
+	header := jsonLine(o("timestamp", stamp, "type", "session_meta", "payload", o(
 		"session_id", id, "id", id, "timestamp", stamp, "cwd", cwd, "originator", "codex_cli_rs",
-		"cli_version", version, "source", "cli", "model_provider", CodexProviderIn(home))))}
+		"cli_version", version, "source", "cli", "model_provider", CodexProviderIn(home))))
+	return append([][]byte{header}, codexCarryBody(cwd, items, now)...)
+}
+
+func codexCarryBody(cwd string, items []carryItem, now time.Time) [][]byte {
+	var lines [][]byte
 	add := func(at time.Time, typ string, payload ord) {
 		lines = append(lines, jsonLine(o("timestamp", carryStamp(at, now), "type", typ, "payload", payload)))
 	}
@@ -895,5 +915,5 @@ func writeCodexCarryID(home, cwd string, items []carryItem, now time.Time, id st
 			add(it.Time, "response_item", o("type", "function_call_output", "call_id", callID, "output", out))
 		}
 	}
-	return CarryResult{Agent: "codex", ID: id, Path: path}, writeNew(path, lines)
+	return lines
 }

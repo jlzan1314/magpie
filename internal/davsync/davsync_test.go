@@ -104,6 +104,10 @@ func (f *fakeDAV) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusPreconditionFailed)
 			return
 		}
+		if _, exists := f.files[r.URL.Path]; exists && strings.HasSuffix(r.URL.Path, "session_manifest.sealed") && r.Header.Get("If-None-Match") == "*" {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		f.n++
 		f.puts++

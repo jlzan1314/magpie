@@ -25,10 +25,12 @@ import (
 const currentSessionDir = "current"
 
 var currentSessionID = batchDigest([]byte("magpie shared WebDAV session backup v1"))
+var sharedSessionHead = batchDigest([]byte("magpie unified WebDAV session catalog"))
 
 type currentPiece struct {
-	ID    string   `json:"id"`
-	Parts []string `json:"parts,omitempty"`
+	ID         string   `json:"id"`
+	Parts      []string `json:"parts,omitempty"`
+	Collection string   `json:"collection,omitempty"`
 }
 type currentThread struct {
 	Meta        sessions.BatchConversation `json:"meta"`
@@ -39,6 +41,15 @@ type currentThread struct {
 	Count       int                        `json:"count"`
 	Pieces      []currentPiece             `json:"pieces"`
 }
+
+func (t currentThread) identity() string {
+	key := batchDigest([]byte(t.Meta.SyncIdentity()))
+	if !t.Meta.HasSyncName() {
+		key = batchDigest([]byte(batchDigest([]byte(t.Origin)) + key))
+	}
+	return key
+}
+
 type sessionLibrary struct {
 	Format  string                   `json:"format"`
 	Threads map[string]currentThread `json:"threads"`
@@ -51,20 +62,10 @@ func newSessionLibrary() sessionLibrary {
 }
 
 func currentStore(c Config, d *dav) batchStore {
-	return batchStore{dav: d, passphrase: c.Passphrase, batchID: currentSessionID, remoteDir: sessionDAVDir, localRoot: path("session-current-" + stateKey(c)), current: true}
+	return batchStore{dav: d, passphrase: c.Passphrase, batchID: currentSessionID, remoteDir: sessionDAVDir, localRoot: path("session-current-" + stateKey(c)), current: true, headKey: sharedSessionHead}
 }
 func (s batchStore) headURL() string {
 	return s.dav.url(folder, sessionDAVDir, currentSessionDir, "heads", "session_"+s.headKey+"_session_manifest.sealed")
-}
-func (s batchStore) writer() (batchStore, error) {
-	if s.headKey != "" {
-		return s, nil
-	}
-	id, err := sessionDeviceID()
-	if err == nil {
-		s.headKey = batchDigest([]byte(id))
-	}
-	return s, err
 }
 func (s batchStore) headCachePath() string {
 	return filepath.Join(s.localRoot, "heads", s.headKey+".json")
@@ -84,10 +85,6 @@ func (s batchStore) cachedHead() cachedSessionHead {
 }
 func (s batchStore) readHead(ctx context.Context) (sessionLibrary, string, error) {
 	head := newSessionLibrary()
-	s, err := s.writer()
-	if err != nil {
-		return head, "", err
-	}
 	cache := s.headCachePath()
 	savedHead := s.cachedHead()
 	if strongSessionTag(savedHead.ETag) {
@@ -102,7 +99,7 @@ func (s batchStore) readHead(ctx context.Context) (sessionLibrary, string, error
 				return m, savedHead.ETag, nil
 			}
 		}
-		if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusGone {
+		if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusGone || res.StatusCode == http.StatusConflict {
 			return head, "", nil
 		}
 	}
@@ -111,7 +108,7 @@ func (s batchStore) readHead(ctx context.Context) (sessionLibrary, string, error
 		return head, "", err
 	}
 	defer res.Body.Close()
-	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusGone {
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusGone || res.StatusCode == http.StatusConflict {
 		return head, "", nil
 	}
 	if res.StatusCode != http.StatusOK {
@@ -135,10 +132,18 @@ func (s batchStore) readHead(ctx context.Context) (sessionLibrary, string, error
 	return decoded, tag, err
 }
 
-// Each installation owns one small mutable head. Reading their union yields
-// one logical backup, even on DAV servers that ignore conditional creation.
-// No device ever replaces another device’s index.
 func (s batchStore) readLibrary(ctx context.Context, remote bool) (sessionLibrary, error) {
+	if remote {
+		if head, tag, err := s.readHead(ctx); err != nil || tag != "" {
+			return head, err
+		}
+	} else if cached := s.cachedHead(); len(cached.Body) > 0 {
+		return s.decodeHead(cached.Body)
+	}
+	return s.readLegacyLibrary(ctx, remote)
+}
+
+func (s batchStore) readLegacyLibrary(ctx context.Context, remote bool) (sessionLibrary, error) {
 	library := newSessionLibrary()
 	var keys []string
 	if remote {
@@ -173,6 +178,9 @@ func (s batchStore) readLibrary(ctx context.Context, remote bool) (sessionLibrar
 	workers := make(chan struct{}, 3)
 	var wg sync.WaitGroup
 	for _, key := range keys {
+		if key == sharedSessionHead {
+			continue
+		}
 		if ctx.Err() != nil {
 			break
 		}
@@ -194,10 +202,11 @@ func (s batchStore) readLibrary(ctx context.Context, remote bool) (sessionLibrar
 				failures = append(failures, err)
 				return
 			}
-			for native, t := range h.Threads {
-				// Keep distinct device histories addressable. Identical
-				// transcripts are collapsed by visible() or native import.
-				library.Threads[batchDigest([]byte(key+native))] = t
+			for _, t := range h.Threads {
+				identity := t.identity()
+				if old := library.Threads[identity]; preferCurrentThread(t, old) {
+					library.Threads[identity] = t
+				}
 			}
 		})
 	}
@@ -230,7 +239,7 @@ func (s batchStore) decodeHead(raw []byte) (sessionLibrary, error) {
 			return sessionLibrary{}, errors.New("invalid current session manifest entry")
 		}
 		for _, p := range t.Pieces {
-			if !validBatchID(p.ID) {
+			if !validBatchID(p.ID) || (p.Collection != "" && !validBatchID(p.Collection)) {
 				return sessionLibrary{}, errors.New("invalid session piece")
 			}
 			for _, id := range p.Parts {
@@ -244,10 +253,6 @@ func (s batchStore) decodeHead(raw []byte) (sessionLibrary, error) {
 }
 
 func (s batchStore) writeHead(ctx context.Context, head sessionLibrary, tag string) error {
-	s, err := s.writer()
-	if err != nil {
-		return err
-	}
 	raw, err := json.Marshal(head)
 	if err != nil {
 		return err
@@ -308,7 +313,7 @@ func (s batchStore) readThread(ctx context.Context, t currentThread) (sessions.B
 		if len(p.Parts) > 0 {
 			m.Parts = map[string][]string{p.ID: p.Parts}
 		}
-		piece, err := s.readEntry(ctx, m, p.ID)
+		piece, err := s.inThread(p.Collection).readEntry(ctx, m, p.ID)
 		if err != nil {
 			return c, err
 		}
@@ -321,18 +326,8 @@ func (s batchStore) readThread(ctx context.Context, t currentThread) (sessions.B
 	return c, err
 }
 
-// Present equal histories once, even if more than one native agent supplied them.
 func (h sessionLibrary) visible() []string {
-	var keys []string
-	seen := map[string]bool{}
-	for _, k := range slices.Sorted(maps.Keys(h.Threads)) {
-		fp := h.Threads[k].Fingerprint
-		if !seen[fp] {
-			keys = append(keys, k)
-			seen[fp] = true
-		}
-	}
-	return keys
+	return slices.Sorted(maps.Keys(h.Threads))
 }
 func (s batchStore) loadCurrent(ctx context.Context, entry string) ([]sessions.BatchConversation, error) {
 	head, err := s.readLibrary(ctx, true)
@@ -376,7 +371,7 @@ func (s batchStore) currentChoice(ctx context.Context, row RestoreChoice, verify
 		h, err = s.readLibrary(ctx, false)
 	}
 	if err == nil && len(h.Threads) > 0 {
-		m := batchManifest{Parts: map[string][]string{}}
+		manifests := map[string]batchManifest{}
 		for _, key := range h.visible() {
 			t := h.Threads[key]
 			if row.Device == "" {
@@ -384,17 +379,26 @@ func (s batchStore) currentChoice(ctx context.Context, row RestoreChoice, verify
 			}
 			row.Entries = append(row.Entries, restoreEntry{key, t.Meta.Title})
 			for _, p := range t.Pieces {
+				m := manifests[p.Collection]
 				m.Entries = append(m.Entries, p.ID)
 				if len(p.Parts) > 0 {
+					if m.Parts == nil {
+						m.Parts = map[string][]string{}
+					}
 					m.Parts[p.ID] = p.Parts
 				}
+				manifests[p.Collection] = m
 			}
 			if !verify && len(row.Entries) == 2 {
 				break
 			}
 		}
 		if verify {
-			err = s.checkManifestFiles(ctx, m, row.WebDAV)
+			for collection, m := range manifests {
+				if err = s.inThread(collection).checkManifestFiles(ctx, m, row.WebDAV); err != nil {
+					break
+				}
+			}
 		}
 		row.Ready, row.RemoteReady = verify && err == nil, row.WebDAV && verify && err == nil
 	}

@@ -572,7 +572,7 @@ window.askPreviewRows = function (at, v, sub) {
     at.append(r);
     return r;
   };
-  if (v.kind === "webdav") sessionTransferRows(at, v, row);
+  if (v.kind === "webdav") sessionSyncRow(at, v, row);
   const peek = el("button", "text", t("Preview…"));
   peek.onclick = async () => {
     peek.classList.add("busy");
@@ -587,35 +587,26 @@ window.askPreviewRows = function (at, v, sub) {
   }
 };
 
-function sessionTransferRows(at, v, row) {
-  const cards = [
-    ["Session sync", "Sync local session changes to WebDAV or import conversations into selected agents.", window.sessionBatchForm],
-    ["Codex session transfer", "Transfer one compressed and encrypted conversation by ID.", window.codexSessionForm],
-  ];
-  for (const [index, [title, subtitle, form]] of cards.entries()) {
-    const button = el("button", "text", t("Open"));
-    const panel = el("div");
-    button.type = "button";
-    let tracker;
-    button.onclick = () => {
-      if (panel.firstChild) {
-        panel.replaceChildren();
-        tracker?.setFormBlocked(false);
-      } else panel.append(form(!!v.followServer, tracker, v));
-      button.textContent = t(panel.firstChild ? "Close" : "Open");
-    };
-    const heading = row(t(title), t(subtitle), button, "sync-session-row");
-    if (index === 0) {
-      const sync = el("button", "text", t("Sync sessions now"));
-      sync.type = "button";
-      if (!v.followServer) button.before(sync);
-      tracker = sessionActivityLine(heading.querySelector(".who"), v, sync, id => {
-        if (!panel.firstChild) button.click();
-        panel.firstChild.useSessionBackup(id);
-      });
-    }
-    at.append(panel);
-  }
+function sessionSyncRow(at, v, row) {
+  const button = el("button", "text", t("Open"));
+  const panel = el("div");
+  button.type = "button";
+  const heading = row(t("Session sync"), t("Sync local session changes to WebDAV or import conversations into selected agents."), button, "sync-session-row");
+  const sync = el("button", "text", t("Sync sessions now"));
+  sync.type = "button";
+  if (!v.followServer) button.before(sync);
+  const tracker = sessionActivityLine(heading.querySelector(".who"), v, sync, id => {
+    if (!panel.firstChild) button.click();
+    panel.firstChild.useSessionBackup(id);
+  });
+  button.onclick = () => {
+    if (panel.firstChild) {
+      panel.replaceChildren();
+      tracker.setFormBlocked(false);
+    } else panel.append(window.sessionBatchForm(!!v.followServer, tracker, v));
+    button.textContent = t(panel.firstChild ? "Close" : "Open");
+  };
+  at.append(panel);
 }
 
 function sessionActivityLine(at, initial, sync, restore) {
@@ -728,39 +719,6 @@ function sessionActivityLine(at, initial, sync, restore) {
   return { setFormBlocked(blocked) { formBlocked = blocked; updateButton(); } };
 }
 
-window.codexSessionForm = function (followsServer) {
-  const form = el("div", "editor sync-form");
-  const sessionID = input("", "");
-  const download = el("button", "text", t("Download"));
-  const upload = el("button", "text", t("Upload…"));
-  const message = el("div", "done sub wraps");
-  message.setAttribute("role", "status");
-  const transfer = async (action) => {
-    const id = sessionID.value.trim();
-    if (!id) { sessionID.focus(); return; }
-    upload.disabled = download.disabled = true;
-    message.textContent = "";
-    message.classList.remove("bad");
-    try {
-      if (action === "push" && !await confirmAction(t("Upload…"),
-        t("The selected conversation may contain private code, prompts and tool output. It will be encrypted before upload."), t("Upload…"))) return;
-      const res = await api("davsync/session", { action, id });
-      message.textContent = res.changed === 0 && res.skipped > 0 ? t("Remote file matches packed size; skipped sync") : t("Done");
-    } catch (err) {
-      message.textContent = t(err.message);
-      message.classList.add("bad");
-    } finally {
-      upload.disabled = download.disabled = false;
-    }
-  };
-  upload.onclick = () => transfer("push");
-  download.onclick = () => transfer("pull");
-  const actions = el("div", "bar", download);
-  if (!followsServer) actions.append(upload);
-  form.append(...field(t("Session ID"), sessionID), actions, message);
-  return form;
-};
-
 // A redraw can reopen the form before its last write comes back. Keep the
 // latest draft available and order the writes so they cannot arrive backward.
 let sessionPrefsDraft, sessionPrefsSaved, sessionPrefsSaving = false;
@@ -784,160 +742,56 @@ async function rememberSessionPreferences(prefs) {
   }
 }
 
-const sessionRefKey = ({ agent, id, wsl }) => JSON.stringify([agent, id, wsl || ""]);
-
 window.sessionBatchForm = function (followsServer, tracker, sync) {
   const draftAtOpen = sessionPrefsDraft;
   const form = el("div", "editor sync-form session-batch-form");
-  const sourceList = el("div", "session-batch-sources");
-  const search = input("", t("Filter sessions"));
-  search.setAttribute("aria-label", t("Filter sessions"));
-  const all = batchTick(t("All readable sessions"));
-  all.input.checked = true;
-  const agentPick = el("button", "proto");
-  agentPick.type = "button";
-  agentPick.setAttribute("aria-label", t("Source agent"));
-  agentPick.setAttribute("aria-haspopup", "menu");
-  const agentName = id => state.agents?.find(a => a.id === id)?.name || (id === "codex" ? "Codex" : id);
-  let sourceAgent = "", sourceAgents = [];
-  const paintAgent = () => agentPick.replaceChildren(el("span", "", sourceAgent ? agentName(sourceAgent) : t("All")), svg(CHEV, 11, 1.6));
-  paintAgent();
-  agentPick.onclick = () => {
-    if (agentPick.classList.contains("open")) return closeProtoMenu();
-    const options = [{ v: "", name: "All", note: "" }, ...sourceAgents.map(id => ({ v: id, name: agentName(id), note: "", literalName: true }))];
-    openProtoMenu(agentPick, options, sourceAgent, id => {
-      sourceAgent = id;
-      paintAgent();
-      filter();
-      changed();
-    }, "Source agent", "", "right");
-  };
-  const filters = el("div", "pair session-batch-filters");
-  filters.append(search, agentPick);
-  const sources = el("div", "stack");
-  sources.append(filters, all.label, sourceList);
-
-  const back = el("textarea", "session-backup-ids");
-  back.rows = 2;
-  back.spellcheck = false;
-  const cwd = input("", "");
-  const advanced = el("details", "more advanced session-batch-advanced");
-  const projectField = el("div", "stack");
-  projectField.append(...field(t("Target project folder"), cwd));
-  advanced.append(el("summary", "", t("Advanced")), projectField);
   const destinations = el("div", "pair wrap session-batch-targets");
   destinations.setAttribute("role", "group");
   destinations.setAttribute("aria-label", t("Import into agents"));
-  const backup = el("button", "text", t("Back up"));
-  const distribute = el("button", "text primary", t("Back up and import"));
-  backup.type = distribute.type = "button";
+  const distribute = el("button", "text primary", t("Merge and apply"));
+  distribute.type = "button";
   const output = el("div", "done session-batch-output sub wraps");
   output.setAttribute("role", "status");
-  const actions = el("div", "bar");
-  actions.append(backup, distribute);
-  let entry = "", entryTitle = "", pendingRestore;
-  const selection = el("div", "hint");
-  const backupField = field(t("Existing backup IDs"), back);
-  backupField[1].append(selection);
+  let restore, targets = [], working = false, loaded = false;
+  const selection = el("div", "hint", "");
+  const clear = el("button", "text", t("Clear"));
+  clear.type = "button";
+  const selectedBackup = el("div", "bar", selection, clear);
+  const chosenTargets = () => targets.filter(c => c.input.checked).map(c => c.agent);
   const chooseBackup = (id, choice) => {
-    if (!loaded) {
-      pendingRestore = [id, choice];
-      return;
-    }
-    back.value = id;
-    all.input.checked = false;
-    for (const c of choices) c.input.checked = false;
-    entry = choice?.id || "";
-    entryTitle = choice?.title || "";
-    changed();
+    restore = { id, entry: choice?.id, title: choice?.title };
+    update();
     destinations.querySelector("input")?.focus(NO_SCROLL);
   };
+  clear.onclick = () => { restore = undefined; update(); };
   form.useSessionBackup = chooseBackup;
-  back.oninput = () => { entry = entryTitle = ""; };
   const autoImport = batchTick(t("Import remote sessions into selected agents on WebDAV sync"));
   const schedule = sync.sessions && !followsServer && sync.auto ? t("Sync local sessions every {n} min", {n: sync.auto}) : t("Automatic sync of local sessions is off");
   const manager = sessionBackupManager(chooseBackup);
-  manager.open = followsServer;
-  form.append(...field(t("Sessions"), sources),
-    ...backupField,
-    ...field(t("Import into agents"), destinations),
+  form.append(...field(t("Import into agents"), destinations),
     ...field(t("Automatic sync"), autoImport.label, schedule),
-    advanced, manager, actions, output);
+    selectedBackup, el("div", "bar", distribute), output, manager);
 
-  let choices = [], targets = [], working = false, loaded = false;
-  const ids = () => back.value.split(/[\s,]+/).filter(Boolean);
-  const chosen = () => choices.filter(c => c.input.checked).map(c => c.ref);
-  const chosenTargets = () => targets.filter(c => c.input.checked).map(c => c.agent);
-  const selectingAll = () => all.input.checked && choices.length !== 0;
-  function changed() {
-    update();
-    if (loaded) rememberSessionPreferences({
-      all: all.input.checked,
-      sources: chosen(),
-      sourceAgent,
-      search: search.value,
-      backupIDs: back.value, entry, entryTitle,
-      autoImport: autoImport.input.checked,
-      targets: chosenTargets(),
-      cwd: cwd.value,
-    });
-  }
   function update() {
-    if (entry && (all.input.checked || choices.some(c => c.input.checked))) entry = entryTitle = "";
-    selection.textContent = entryTitle || entry;
-    selection.hidden = !entry;
-    autoImport.input.disabled = !loaded || !chosenTargets().length;
-    if (loaded && !chosenTargets().length) autoImport.input.checked = false;
-    const ready = loaded && (ids().length !== 0 || selectingAll() || choices.some(c => c.input.checked));
-    backup.disabled = working || !ready;
-    distribute.textContent = ids().length && !selectingAll() && !chosen().length ? t("Import") : t("Back up and import");
-    distribute.disabled = working || !ready || targets.every(c => !c.input.checked);
-    if (form.isConnected) tracker.setFormBlocked(working || !loaded || !choices.length);
-    sourceList.hidden = all.input.checked && (!loaded || choices.length !== 0);
-    all.input.disabled = !loaded || !choices.length;
-    agentPick.disabled = !loaded || all.input.checked || sourceAgents.length === 0;
-    search.disabled = !loaded || all.input.checked;
-    back.disabled = cwd.disabled = manager.hidden = !loaded;
+    selection.textContent = restore?.title || restore?.id || "";
+    selectedBackup.hidden = !restore;
+    const hasTargets = chosenTargets().length !== 0;
+    autoImport.input.disabled = !loaded || !hasTargets;
+    if (loaded && !hasTargets) autoImport.input.checked = false;
+    distribute.textContent = t(restore || followsServer ? "Import" : "Merge and apply");
+    distribute.disabled = working || !loaded || !hasTargets;
+    tracker.setFormBlocked(working);
   }
-  function filter() {
-    const needle = search.value.trim().toLocaleLowerCase();
-    for (const c of choices) {
-      c.label.hidden = !c.text.includes(needle) || (sourceAgent && c.ref.agent !== sourceAgent);
-    }
-  }
-  form.addEventListener("input", changed);
-  search.addEventListener("input", filter);
+  form.addEventListener("input", () => {
+    update();
+    if (loaded) rememberSessionPreferences({ targets: chosenTargets(), autoImport: autoImport.input.checked });
+  });
   update();
-  api("davsync/session-candidates", {}).then((r) => {
+  api("davsync/session-candidates", {}).then(r => {
     if (!form.isConnected) return;
     const prefs = (sessionPrefsDraft !== sessionPrefsSaved || draftAtOpen !== sessionPrefsDraft
       ? sessionPrefsDraft : r.preferences) || {};
-    all.input.checked = prefs.all !== false;
-    search.value = prefs.search || "";
-    back.value = prefs.backupIDs || "";
-    entry = prefs.entry || "";
-    entryTitle = prefs.entryTitle || "";
-    cwd.value = prefs.cwd || "";
-    advanced.open = !!cwd.value;
     autoImport.input.checked = !!prefs.autoImport;
-    const selected = new Set((prefs.sources || []).map(sessionRefKey));
-    choices = r.sources.map(({ agent, id, wsl, title, cwd }) => {
-      const meta = [agentName(agent), wsl, cwd].filter(Boolean).join(" · ");
-      const tick = batchTick(title || id);
-      tick.label.lastElementChild.append(el("span", "sub", meta));
-      tick.ref = { agent, id, wsl };
-      tick.input.checked = selected.has(sessionRefKey(tick.ref));
-      tick.text = [title, meta, id].join(" ").toLocaleLowerCase();
-      return tick;
-    });
-    sourceList.replaceChildren(...choices.map(c => c.label));
-    sourceAgents = [...new Set(choices.map(c => c.ref.agent))].sort();
-    sourceAgent = sourceAgents.includes(prefs.sourceAgent) ? prefs.sourceAgent : "";
-    paintAgent();
-    if (!choices.length) {
-      manager.open = true;
-      sourceList.append(el("div", "sub", t("No readable sessions found")));
-    }
     targets = r.targets.map(agent => {
       const tick = batchTick(agent === "codex" ? "Codex" : "Claude Code");
       tick.agent = agent;
@@ -946,30 +800,26 @@ window.sessionBatchForm = function (followsServer, tracker, sync) {
     });
     destinations.append(...targets.map(c => c.label));
     loaded = true;
-    if (pendingRestore) chooseBackup(...pendingRestore);
-    filter();
     update();
     if (r.preferencesError) showBatchFailure(output, r.preferencesError);
   }).catch(err => showBatchFailure(output, err.message));
 
-  async function run(importing) {
+  distribute.onclick = async () => {
     const req = {
-      all: selectingAll(),
-      sources: selectingAll() ? [] : chosen(),
-      backups: ids(),
-      entry,
-      targets: importing ? chosenTargets() : [],
-      cwd: importing ? cwd.value.trim() : "",
+      current: !restore,
+      backups: restore ? [restore.id] : [],
+      entry: restore?.entry,
+      targets: chosenTargets(),
     };
     working = true;
     update();
     output.replaceChildren();
     output.classList.remove("bad");
     try {
-      if ((req.all || req.sources.length) && !await confirmAction(
+      if (req.current && !followsServer && !await confirmAction(
         t("Session sync"),
-        t("The selected conversations may include private source code, prompts and tool output. Each backup is encrypted."),
-        t("Back up"))) return;
+        t("All readable conversations will be backed up to WebDAV with encryption."),
+        t("Merge and apply"))) return;
       output.textContent = t("Working…");
       const result = await api("davsync/session-batch", req);
       output.replaceChildren();
@@ -981,9 +831,7 @@ window.sessionBatchForm = function (followsServer, tracker, sync) {
       working = false;
       update();
     }
-  }
-  backup.onclick = () => run(false);
-  distribute.onclick = () => run(true);
+  };
   return form;
 };
 

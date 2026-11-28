@@ -68,7 +68,7 @@ func TestCurrentSessionAppendRestoresWholeThread(t *testing.T) {
 	if len(thread.Pieces) != 2 {
 		t.Fatal("expected one initial piece and one append", thread)
 	}
-	delta, err := store.readEntry(ctx, batchManifest{}, thread.Pieces[1].ID)
+	delta, err := store.inThread(thread.Pieces[1].Collection).readEntry(ctx, batchManifest{}, thread.Pieces[1].ID)
 	if err != nil || len(delta.Parts) != 1 || delta.Parts[0].Text != "only the appended reply" {
 		t.Fatal("delta contains old history", delta, err)
 	}
@@ -112,21 +112,29 @@ func TestCurrentBackupConcurrentWriters(t *testing.T) {
 	backupTestHome(t, t.TempDir(), cfg)
 	d, _ := newDAV(cfg)
 	sources := []string{testThreadA, testThreadB}
+	creation := time.Date(2026, time.November, 25, 10, 0, 0, 0, time.UTC)
 	var wg sync.WaitGroup
 	for i, id := range sources {
 		store := currentStore(cfg, d)
 		store.localRoot = t.TempDir()
-		store.headKey = batchDigest([]byte(id))
-		c := sessions.BatchConversation{Sources: []sessions.BatchSource{{Agent: "codex", ID: id}}, Parts: []sessions.Part{{Role: "user", Kind: "text", Text: id}}}
-		raw, _ := json.Marshal(c)
-		piece, err := store.stagePiece(ctx, sessions.BatchConversation{Parts: c.Parts})
-		if err != nil {
-			t.Fatal(err)
+		plan := currentPlan{Unified: true, Changes: map[string]currentChange{}}
+		for _, title := range []string{id, "shared conversation"} {
+			c := sessions.BatchConversation{
+				Sources: []sessions.BatchSource{{Agent: "codex", ID: id}}, Title: title,
+				Start: creation, Last: creation.Add(time.Duration(i) * time.Minute),
+				Parts: []sessions.Part{{Role: "user", Kind: "text", Text: title + " " + id}},
+			}
+			raw, _ := json.Marshal(c)
+			thread := currentThread{Meta: c, Origin: id, Count: 1, Fingerprint: c.Fingerprint(), Revision: batchDigest(raw)}
+			key := thread.identity()
+			piece, err := store.stagePiece(ctx, sessions.BatchConversation{Parts: c.Parts})
+			if err != nil {
+				t.Fatal(err)
+			}
+			piece.Collection = key
+			thread.Meta.Parts, thread.Pieces = nil, []currentPiece{piece}
+			plan.Changes[key] = currentChange{Thread: thread}
 		}
-		key := currentThreadKey(c.Sources[0])
-		fp := c.Fingerprint()
-		c.Parts = nil
-		plan := currentPlan{Changes: map[string]currentChange{key: {Thread: currentThread{Meta: c, Origin: id, Count: 1, Fingerprint: fp, Revision: batchDigest(raw), Pieces: []currentPiece{piece}}}}}
 		wg.Go(func() {
 			if _, err := store.commitPlan(ctx, plan); err != nil {
 				t.Errorf("writer %d: %v", i, err)
@@ -136,10 +144,60 @@ func TestCurrentBackupConcurrentWriters(t *testing.T) {
 	wg.Wait()
 	store := currentStore(cfg, d)
 	head, err := store.readLibrary(ctx, true)
-	if err != nil || len(head.Threads) != 2 {
+	if err != nil || len(head.Threads) != 3 {
 		t.Fatal("one writer displaced another", len(head.Threads), err)
 	}
+	shared := currentThread{Meta: sessions.BatchConversation{Title: "shared conversation", Start: creation}}
+	if winner := head.Threads[shared.identity()]; winner.Origin != testThreadB {
+		t.Fatalf("older revision won the concurrent update: %+v", winner)
+	}
 }
+
+func TestCurrentBackupMigratesDeviceManifests(t *testing.T) {
+	server := httptest.NewServer(newSizeAwareDAV())
+	defer server.Close()
+	ctx := context.Background()
+	cfg := Config{URL: server.URL + "/dav", User: "me", Password: "pw", Passphrase: "legacy migration"}
+	backupTestHome(t, t.TempDir(), cfg)
+	dav, err := newDAV(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := t.TempDir()
+	backupTestThread(t, testThreadA, "earlier shared backup", project)
+	legacy := currentStore(cfg, dav)
+	legacy.headKey = batchDigest([]byte("legacy device"))
+	plan, err := legacy.prepareLocalArchive(ctx, newSessionLibrary())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.commitPlan(ctx, plan); err != nil {
+		t.Fatal(err)
+	}
+	backupTestHome(t, t.TempDir(), cfg)
+	result, err := SyncLocalSessions(ctx)
+	if err != nil || result.Conversations != 1 {
+		t.Fatalf("migrating shared backup: %+v %v", result, err)
+	}
+	store := currentStore(cfg, dav)
+	head, _, err := store.readHead(ctx)
+	if err != nil || len(head.Threads) != 1 {
+		t.Fatalf("unified catalog: %+v %v", head, err)
+	}
+	for key, thread := range head.Threads {
+		if thread.Pieces[0].Collection != key {
+			t.Fatalf("piece was not moved to its session directory: %+v", thread.Pieces)
+		}
+		entry, err := store.readThread(ctx, thread)
+		if err != nil || len(entry.Parts) != 1 || entry.Parts[0].Text != "earlier shared backup" {
+			t.Fatalf("migrated transcript: %+v %v", entry, err)
+		}
+	}
+	if previous, _, err := legacy.readHead(ctx); err != nil || len(previous.Threads) != 1 {
+		t.Fatalf("previous backup: %+v %v", previous, err)
+	}
+}
+
 func TestRestoreIndexNeedsNoTranscriptReads(t *testing.T) {
 	fake := newSizeAwareDAV()
 	var metadata, gets atomic.Int32

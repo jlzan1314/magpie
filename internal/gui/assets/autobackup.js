@@ -327,14 +327,9 @@ function restoreAutoSessions(b) {
   });
   const targets = el("div","pair wrap");
   targets.append(...options.map(o => o.label));
-  const folder = input("", t("Target project folder"));
   const phrase = input("", t("Passphrase"), "password");
-  const advanced=el("details","more advanced");
-  const project=el("div","stack");
-  project.append(...field(t("Target project folder"),folder));
-  advanced.append(el("summary","",t("Advanced")),project);
   ed.append(el("b","",t("Restore sessions…")), ...field(t("Import into agents"),targets),
-    advanced, ...field(t("Passphrase"),phrase,t("Leave empty to use the saved passphrase.")));
+    ...field(t("Passphrase"),phrase,t("Leave empty to use the saved passphrase.")));
   const cancel = el("button","text",t("Cancel"));
   const go = el("button","text primary",t("Import"));
   const say = syncBar(ed,"",el("span","grow"),cancel,go);
@@ -345,7 +340,7 @@ function restoreAutoSessions(b) {
     cancel.disabled = go.disabled = true;
     try {
       const selected = ["claude","codex"].filter((_,i) => options[i].checkbox.checked);
-      const r = await api("autobackup/restore-sessions",{name:b.name,targets:selected,cwd:folder.value.trim(),passphrase:phrase.value});
+      const r = await api("autobackup/restore-sessions",{name:b.name,targets:selected,passphrase:phrase.value});
       const failure = r.imports?.find(x => x.error);
       if (failure) throw new Error(failure.error);
       closeConfirmAsk();

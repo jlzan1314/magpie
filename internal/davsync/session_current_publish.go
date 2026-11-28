@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/yetone/magpie/internal/backup"
 	"github.com/yetone/magpie/internal/filelock"
@@ -52,10 +53,11 @@ type currentChange struct {
 	Mark   string
 }
 type currentPlan struct {
-	Checks  map[string]string
-	Changes map[string]currentChange
-	Failed  []sessions.BatchFailure
-	Skipped int
+	Checks     map[string]string
+	Changes    map[string]currentChange
+	Failed     []sessions.BatchFailure
+	Duplicates int  `json:",omitempty"`
+	Unified    bool `json:",omitempty"`
 }
 
 func (s batchStore) checkpoint() string { return filepath.Join(s.localRoot, "marks.json") }
@@ -73,7 +75,7 @@ func (s batchStore) marks() map[string]currentMark {
 	return out
 }
 
-func (s batchStore) prepareCurrent(ctx context.Context, head sessionLibrary, refs []sessions.BatchSource, all, outgoing bool, extra []sessions.BatchConversation) (currentPlan, error) {
+func (s batchStore) prepareLocalArchive(ctx context.Context, head sessionLibrary) (currentPlan, error) {
 	plan := currentPlan{Changes: map[string]currentChange{}, Checks: map[string]string{}}
 	origin, err := sessionDeviceID()
 	if err != nil {
@@ -90,7 +92,6 @@ func (s batchStore) prepareCurrent(ctx context.Context, head sessionLibrary, ref
 		}
 		return false
 	}
-	mergingBackup := false
 	visit := func(c sessions.BatchConversation, mark string) error {
 		key := currentThreadKey(c.Sources[0])
 		old := head.Threads[key]
@@ -99,36 +100,6 @@ func (s batchStore) prepareCurrent(ctx context.Context, head sessionLibrary, ref
 			return err
 		}
 		revision := batchDigest(raw)
-		if mergingBackup {
-			previous := old
-			if change, ok := plan.Changes[key]; ok {
-				previous = change.Thread
-			}
-			if previous.Count > 0 && previous.Revision != revision {
-				compatible := previous.Count <= len(c.Parts) && fingerprintPrefix(c, previous.Count) == previous.Fingerprint
-				if !compatible && previous.Count >= len(c.Parts) {
-					kept, e := s.readThread(ctx, previous)
-					if e != nil {
-						return e
-					}
-					if slices.Equal(kept.Parts[:len(c.Parts)], c.Parts) {
-						if _, pending := plan.Changes[key]; !pending {
-							plan.Checks[key] = previous.Revision
-						}
-						return nil
-					}
-				}
-				if !compatible {
-					key = batchDigest([]byte(key + "\x00" + c.Fingerprint()))
-					old = head.Threads[key]
-				}
-			} else if previous.Revision == revision {
-				if _, pending := plan.Changes[key]; !pending {
-					plan.Checks[key] = revision
-				}
-				return nil
-			}
-		}
 		if revision == old.Revision {
 			marks[key] = currentMark{mark, revision}
 			plan.Checks[key] = revision
@@ -152,15 +123,9 @@ func (s batchStore) prepareCurrent(ctx context.Context, head sessionLibrary, ref
 		plan.Changes[key] = currentChange{old.Revision, t, mark}
 		return nil
 	}
-	plan.Failed, err = sessions.VisitBatch(ctx, refs, all, true, outgoing, skip, visit)
+	plan.Failed, err = sessions.VisitBatch(ctx, nil, true, true, false, skip, visit)
 	if err != nil {
 		return plan, err
-	}
-	mergingBackup = true
-	for _, c := range extra {
-		if err = visit(c, ""); err != nil {
-			return plan, err
-		}
 	}
 	if data, e := json.Marshal(marks); e == nil {
 		_ = writeBatchFile(s.checkpoint(), data)
@@ -170,6 +135,132 @@ func (s batchStore) prepareCurrent(ctx context.Context, head sessionLibrary, ref
 func fingerprintPrefix(c sessions.BatchConversation, n int) string {
 	c.Parts = c.Parts[:n]
 	return c.Fingerprint()
+}
+
+func preferCurrentThread(candidate, old currentThread) bool {
+	if old.Revision == "" {
+		return true
+	}
+	if order := candidate.Meta.Last.Compare(old.Meta.Last); order != 0 {
+		return order > 0
+	}
+	if candidate.Count != old.Count {
+		return candidate.Count > old.Count
+	}
+	return strings.Compare(candidate.Fingerprint, old.Fingerprint) > 0
+}
+
+func rewritesOwnSession(candidate, old currentThread) bool {
+	return old.Revision != "" && candidate.Origin == old.Origin && candidate.Meta.Sources[0] == old.Meta.Sources[0] &&
+		candidate.Fingerprint != old.Fingerprint && !candidate.Meta.Last.Before(old.Meta.Last)
+}
+
+func (s batchStore) prepareUnified(ctx context.Context, head sessionLibrary, req SessionBatchRequest, extra []sessions.BatchConversation) (currentPlan, error) {
+	plan := currentPlan{Changes: map[string]currentChange{}, Checks: map[string]string{}, Unified: true}
+	origin, err := sessionDeviceID()
+	if err != nil {
+		return plan, err
+	}
+	host, _ := os.Hostname()
+	marks := s.marks()
+	local := map[sessions.BatchSource]string{}
+	for key, t := range head.Threads {
+		if t.Origin == origin {
+			local[t.Meta.Sources[0]] = key
+		}
+	}
+	skip := func(ref sessions.BatchSource, stamp string) bool {
+		key, ok := local[ref]
+		t := head.Threads[key]
+		if !ok || stamp == "" || marks[key] != (currentMark{stamp, t.Revision}) {
+			return false
+		}
+		plan.Checks[key] = t.Revision
+		return true
+	}
+	visited := map[string]bool{}
+	localCapture := true
+	visit := func(c sessions.BatchConversation, mark string) error {
+		raw, err := json.Marshal(c)
+		if err != nil {
+			return err
+		}
+		candidate := currentThread{Meta: c, Origin: origin, Device: host, Count: len(c.Parts), Revision: batchDigest(raw), Fingerprint: c.Fingerprint()}
+		key := candidate.identity()
+		if visited[key] {
+			plan.Duplicates++
+		}
+		visited[key] = true
+		base := head.Threads[key]
+		old := base
+		pending, changed := plan.Changes[key]
+		if changed {
+			old = pending.Thread
+		}
+		if !preferCurrentThread(candidate, old) && !(localCapture && rewritesOwnSession(candidate, old)) {
+			if !changed {
+				plan.Checks[key] = old.Revision
+			}
+			return nil
+		}
+		start := 0
+		if base.Count > 0 && base.Count <= candidate.Count && fingerprintPrefix(c, base.Count) == base.Fingerprint {
+			start = base.Count
+			candidate.Pieces = slices.Clone(base.Pieces)
+		}
+		if start < candidate.Count {
+			p, err := s.stagePiece(ctx, sessions.BatchConversation{Parts: c.Parts[start:]})
+			if err != nil {
+				return err
+			}
+			p.Collection = key
+			candidate.Pieces = append(candidate.Pieces, p)
+		}
+		candidate.Meta.Parts = nil
+		plan.Changes[key] = currentChange{base.Revision, candidate, mark}
+		delete(plan.Checks, key)
+		return nil
+	}
+	plan.Failed, err = sessions.VisitBatch(ctx, req.Sources, req.All, true, len(head.Threads) != 0, skip, visit)
+	if err != nil {
+		return plan, err
+	}
+	localCapture = false
+	for _, entry := range extra {
+		if err := visit(entry, ""); err != nil {
+			return plan, err
+		}
+	}
+	return plan, nil
+}
+
+func (s batchStore) moveLegacyPieces(ctx context.Context, plan *currentPlan, legacy sessionLibrary) error {
+	for key, thread := range legacy.Threads {
+		if _, ok := plan.Changes[key]; !ok {
+			plan.Changes[key] = currentChange{Thread: thread}
+		}
+		delete(plan.Checks, key)
+	}
+	for key, change := range plan.Changes {
+		change.Thread.Pieces = slices.Clone(change.Thread.Pieces)
+		for i, p := range change.Thread.Pieces {
+			if p.Collection != "" {
+				continue
+			}
+			for _, o := range p.objects() {
+				_, err := readVerifiedBatchFile(ctx, &s, o.kind, o.id, func(raw []byte) (struct{}, error) {
+					return struct{}{}, s.verifyObject(raw, o.kind, o.id)
+				})
+				if err != nil {
+					return err
+				}
+			}
+			p.Collection = key
+			change.Thread.Pieces[i] = p
+		}
+		plan.Changes[key] = change
+	}
+	return nil
 }
 
 func (s batchStore) savePlan(plan currentPlan) (string, error) {
@@ -205,7 +296,7 @@ func (s batchStore) readPlan(id string) (currentPlan, error) {
 }
 
 func (s batchStore) commitPlan(ctx context.Context, plan currentPlan) (SessionBatchResult, error) {
-	r := SessionBatchResult{Failed: slices.Clone(plan.Failed), Skipped: plan.Skipped}
+	r := SessionBatchResult{Failed: slices.Clone(plan.Failed), Duplicates: plan.Duplicates}
 	initial, _, err := s.readHead(ctx)
 	if err != nil {
 		return r, err
@@ -216,15 +307,15 @@ func (s batchStore) commitPlan(ctx context.Context, plan currentPlan) (SessionBa
 			check[key] = currentChange{Base: rev, Thread: t}
 		}
 	}
-	sizes, err := s.dav.listRemoteSizes(ctx, folder, sessionDAVDir, currentSessionDir)
-	if err != nil {
-		return r, err
+	type storedObject struct {
+		batchObject
+		collection string
 	}
-	objects := map[batchObject]bool{}
+	objects := map[storedObject]bool{}
 	for _, ch := range check {
 		for _, p := range ch.Thread.Pieces {
 			for _, o := range p.objects() {
-				objects[o] = true
+				objects[storedObject{o, p.Collection}] = true
 			}
 		}
 	}
@@ -235,34 +326,50 @@ func (s batchStore) commitPlan(ctx context.Context, plan currentPlan) (SessionBa
 		}
 	}
 	updateSessionActivity(ctx, func(a *SessionActivity) { a.Phase = "uploading"; a.Count = len(objects) + 1; a.Total = total })
-	verified := map[batchObject]bool{}
-	ready := false
+	verified := map[storedObject]bool{}
+	type remoteCollection struct {
+		sizes map[string]remoteSessionFile
+		ready bool
+	}
+	collections := map[string]*remoteCollection{}
 	changes := maps.Clone(plan.Changes)
 	for _, key := range slices.Sorted(maps.Keys(check)) {
 		t := check[key].Thread
 		for _, p := range t.Pieces {
 			for _, o := range p.objects() {
-				if verified[o] {
+				stored := storedObject{o, p.Collection}
+				if verified[stored] {
 					continue
 				}
-				name := s.remoteObjectPath(o.kind, o.id)[2]
+				pieceStore := s.inThread(p.Collection)
+				objectPath := pieceStore.remoteObjectPath(o.kind, o.id)
+				name := objectPath[len(objectPath)-1]
 				info, e := os.Stat(s.filename(o.kind, o.id))
 				// An existing prefix from another device may only be on DAV.
 				if errors.Is(e, fs.ErrNotExist) {
-					e = s.verifyRemote(ctx, o.kind, o.id)
+					e = pieceStore.verifyRemote(ctx, o.kind, o.id)
 					if e != nil {
 						return r, e
 					}
-					verified[o] = true
+					verified[stored] = true
 					r.Skipped++
 					continue
 				}
 				if e != nil {
 					return r, e
 				}
-				probe := sizes
+				collection := collections[p.Collection]
+				if collection == nil {
+					sizes, err := s.dav.listRemoteSizes(ctx, append([]string{folder}, objectPath[:len(objectPath)-1]...)...)
+					if err != nil {
+						return r, err
+					}
+					collection = &remoteCollection{sizes: sizes}
+					collections[p.Collection] = collection
+				}
+				probe := collection.sizes
 				e = retrySessionOperation(ctx, func() error {
-					skipped, e := s.publishObject(ctx, o, info.Size(), probe, batchStore{}, nil, &ready)
+					skipped, e := pieceStore.publishObject(ctx, o, info.Size(), probe, batchStore{}, nil, &collection.ready)
 					probe = nil
 					if e == nil {
 						if skipped {
@@ -284,8 +391,8 @@ func (s batchStore) commitPlan(ctx context.Context, plan currentPlan) (SessionBa
 					delete(changes, key)
 					break
 				}
-				verified[o] = true
-				delete(sizes, name) // never rely on stale pre-write metadata
+				verified[stored] = true
+				delete(collection.sizes, name) // never rely on stale pre-write metadata
 				updateSessionActivity(ctx, func(a *SessionActivity) { a.Objects++; a.Bytes += info.Size(); a.Sending = 0 })
 			}
 			if _, rejected := plan.Changes[key]; rejected {
@@ -298,7 +405,7 @@ func (s batchStore) commitPlan(ctx context.Context, plan currentPlan) (SessionBa
 			}
 		}
 	}
-	if len(changes) == 0 && len(plan.Checks) == 0 && len(r.Failed) > 0 && plan.Skipped == 0 {
+	if len(changes) == 0 && len(plan.Checks) == 0 && len(r.Failed) > 0 {
 		return r, errAllSessionsRejected
 	}
 	// A desktop and CLI on this machine may submit edits concurrently. Keep
@@ -318,30 +425,29 @@ func (s batchStore) commitPlan(ctx context.Context, plan currentPlan) (SessionBa
 			return r, err
 		}
 		dirty := false
+		written := map[string]string{}
 		for key, ch := range changes {
 			old := head.Threads[key]
 			if old.Revision == ch.Thread.Revision {
 				continue
 			}
-			if old.Revision != ch.Base {
-				return r, errChanged
+			if !preferCurrentThread(ch.Thread, old) && !(old.Revision == ch.Base && rewritesOwnSession(ch.Thread, old)) {
+				continue
 			}
 			head.Threads[key] = ch.Thread
+			written[key] = ch.Thread.Revision
 			dirty = true
 		}
 		if len(head.Threads) == 0 {
 			return r, errEmptySessionBatch
 		}
 		if dirty {
-			if !ready {
+			if tag == "" {
 				for _, dirs := range [][]string{{folder}, {folder, sessionDAVDir}, {folder, sessionDAVDir, currentSessionDir}} {
 					if err = s.dav.ensureSessionCollection(ctx, dirs); err != nil {
 						return r, err
 					}
 				}
-				ready = true
-			}
-			if tag == "" {
 				if err = s.dav.ensureSessionCollection(ctx, []string{folder, sessionDAVDir, currentSessionDir, "heads"}); err != nil {
 					return r, err
 				}
@@ -357,31 +463,33 @@ func (s batchStore) commitPlan(ctx context.Context, plan currentPlan) (SessionBa
 			if err != nil {
 				return r, err
 			}
-			for key, ch := range changes {
-				if observed.Threads[key].Revision != ch.Thread.Revision {
+			for key, revision := range written {
+				if t := observed.Threads[key]; t.Revision != revision && !preferCurrentThread(t, head.Threads[key]) {
 					return r, errChanged
 				}
 			}
+			head = observed
 			r.Uploaded++
 		} else {
 			r.Skipped++
 		}
 		marks := s.marks()
 		for key, ch := range changes {
-			marks[key] = currentMark{ch.Mark, ch.Thread.Revision}
+			if head.Threads[key].Revision == ch.Thread.Revision {
+				marks[key] = currentMark{ch.Mark, ch.Thread.Revision}
+			}
 		}
 		raw, _ := json.Marshal(marks)
 		if err = writeBatchFile(s.checkpoint(), raw); err != nil {
 			return r, err
 		}
 		r.Backup, r.Remote, r.Conversations = currentSessionID, true, len(head.visible())
-		r.Duplicates = len(head.Threads) - r.Conversations
 		r.selected = map[string]currentThread{}
 		for key := range changes {
 			r.selected[key] = head.Threads[key]
 		}
-		for key, rev := range plan.Checks {
-			if t := head.Threads[key]; t.Revision == rev {
+		for key := range plan.Checks {
+			if t, ok := head.Threads[key]; ok {
 				r.selected[key] = t
 			}
 		}
@@ -392,20 +500,31 @@ func (s batchStore) commitPlan(ctx context.Context, plan currentPlan) (SessionBa
 }
 
 func (s batchStore) updateCurrent(ctx context.Context, req SessionBatchRequest, extra []sessions.BatchConversation, onPrepared func(string, []sessions.BatchFailure) error) (SessionBatchResult, error) {
-	head, _, err := s.readHead(ctx)
+	head, tag, err := s.readHead(ctx)
 	if err != nil {
 		return SessionBatchResult{}, err
 	}
-	plan, err := s.prepareCurrent(ctx, head, req.Sources, req.All, onPrepared != nil, extra)
+	if tag == "" {
+		head, err = s.readLegacyLibrary(ctx, true)
+		if err != nil {
+			return SessionBatchResult{}, err
+		}
+	}
+	plan, err := s.prepareUnified(ctx, head, req, extra)
 	if err != nil {
 		return SessionBatchResult{}, err
+	}
+	if tag == "" {
+		if err := s.moveLegacyPieces(ctx, &plan, head); err != nil {
+			return SessionBatchResult{}, err
+		}
 	}
 	if len(plan.Changes) == 0 && len(plan.Checks) > 0 {
 		return s.commitPlan(ctx, plan)
 	}
 	if len(plan.Changes) == 0 {
-		r := SessionBatchResult{Skipped: plan.Skipped, Failed: plan.Failed, Conversations: len(head.Threads)}
-		if plan.Skipped > 0 {
+		r := SessionBatchResult{Failed: plan.Failed, Conversations: len(head.Threads)}
+		if len(head.Threads) > 0 && len(plan.Failed) == 0 {
 			r.Backup, r.Remote = currentSessionID, true
 			return r, nil
 		}

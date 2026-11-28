@@ -385,7 +385,7 @@ func TestSessionBatchSkipAndLocalChangeSync(t *testing.T) {
 		original = thread.Pieces[0]
 		break
 	}
-	truncatedPath := store.remoteObjectPath("conversations", original.ID)
+	truncatedPath := store.inThread(original.Collection).remoteObjectPath("conversations", original.ID)
 	remoteFile := "/dav/" + folder + "/" + strings.Join(truncatedPath, "/")
 	davSrv.mu.Lock()
 	orig, exists := davSrv.files[remoteFile]

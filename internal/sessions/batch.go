@@ -45,7 +45,24 @@ type BatchConversation struct {
 	Title   string        `json:"title"`
 	Cwd     string        `json:"cwd"`
 	Start   time.Time     `json:"start"`
+	Last    time.Time     `json:"last,omitzero"`
 	Parts   []Part        `json:"parts"`
+}
+
+func (c BatchConversation) SyncIdentity() string {
+	name := strings.ToLower(strings.Join(strings.Fields(c.Title), " "))
+	if name != "" && !c.Start.IsZero() {
+		return name + "\x00" + c.Start.UTC().Format(time.RFC3339Nano)
+	}
+	if len(c.Sources) == 0 {
+		return ""
+	}
+	raw, _ := json.Marshal(c.Sources[0])
+	return string(raw)
+}
+
+func (c BatchConversation) HasSyncName() bool {
+	return !c.Start.IsZero() && strings.TrimSpace(c.Title) != ""
 }
 
 func batchSources() map[BatchSource]Session {
@@ -59,12 +76,20 @@ func batchSources() map[BatchSource]Session {
 }
 
 func BatchCandidates() []BatchCandidate {
-	src := batchSources()
+	return batchCandidates(batchSources())
+}
+
+func batchCandidates(src map[BatchSource]Session) []BatchCandidate {
 	out := make([]BatchCandidate, 0, len(src))
 	for ref, s := range src {
-		out = append(out, BatchCandidate{ref, s.Title, s.Cwd, s.Last})
+		out = append(out, BatchCandidate{BatchSource: ref, Title: s.Title, Cwd: s.Cwd, Last: s.Last})
 	}
-	slices.SortFunc(out, func(a, b BatchCandidate) int { return b.Last.Compare(a.Last) })
+	slices.SortFunc(out, func(a, b BatchCandidate) int {
+		if order := b.Last.Compare(a.Last); order != 0 {
+			return order
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
 	return out
 }
 
@@ -183,7 +208,10 @@ func SettledFileMark(path string) string {
 }
 
 func readBatchConversation(ctx context.Context, ref BatchSource, s Session) (BatchConversation, error) {
-	c := BatchConversation{Sources: []BatchSource{ref}, Title: s.Title, Cwd: s.Cwd, Start: s.Start}
+	c := BatchConversation{Sources: []BatchSource{ref}, Title: s.Title, Cwd: s.Cwd, Start: s.Start, Last: s.Last}
+	if saved, ok := findBatchImport(s); ok && saved.Identity != "" {
+		c.Title, c.Start = saved.Title, saved.Start
+	}
 	if !Reads(s.Agent) {
 		return c, ErrNotRead
 	}
@@ -319,6 +347,14 @@ func CheckBatchTargets(targets []string, cwd string) error {
 // ImportBatch distributes the same batch to each selected target in one
 // operation. A target's failure can be retried from the preserved backup.
 func ImportBatch(ctx context.Context, entries []BatchConversation, targets []string, cwd string) ([]BatchImport, error) {
+	return importBatch(ctx, entries, targets, cwd, false)
+}
+
+func ApplyBatch(ctx context.Context, entries []BatchConversation, targets []string, cwd string) ([]BatchImport, error) {
+	return importBatch(ctx, entries, targets, cwd, true)
+}
+
+func importBatch(ctx context.Context, entries []BatchConversation, targets []string, cwd string, unified bool) ([]BatchImport, error) {
 	if len(targets) == 0 {
 		return nil, errors.New("choose one or more target agents")
 	}
@@ -326,24 +362,24 @@ func ImportBatch(ctx context.Context, entries []BatchConversation, targets []str
 		return nil, err
 	}
 	targets = slices.Compact(slices.Sorted(slices.Values(targets)))
-	projects := make([]string, len(entries))
-	for i, c := range entries {
-		project, err := batchProject(cwd, c.Cwd)
-		if err != nil {
-			return nil, err
-		}
-		projects[i] = project
+	if len(entries) == 0 {
+		return nil, ctx.Err()
 	}
-	existing := knownBatchTargets(ctx, entries, targets, projects)
+	project, err := batchProject(cwd)
+	if err != nil {
+		return nil, err
+	}
+	global := unified && cwd == ""
+	existing := knownBatchTargets(ctx, entries, targets, project, unified, global)
 	items := make([][]BatchImport, len(targets))
 	var wg sync.WaitGroup
 	for i, target := range targets {
 		wg.Go(func() {
-			for j, c := range entries {
+			for _, c := range entries {
 				if ctx.Err() != nil {
 					return
 				}
-				items[i] = append(items[i], importBatchItem(c, target, projects[j], existing))
+				items[i] = append(items[i], importBatchItem(ctx, c, target, project, existing, unified, global))
 			}
 		})
 	}
@@ -353,42 +389,58 @@ func ImportBatch(ctx context.Context, entries []BatchConversation, targets []str
 
 type batchDestination struct{ agent, cwd, fingerprint string }
 
-func knownBatchTargets(ctx context.Context, entries []BatchConversation, targets, projects []string) map[batchDestination]Session {
-	wanted := map[string]map[string]bool{}
-	for i, c := range entries {
-		project := filepath.Clean(projects[i])
-		if wanted[project] == nil {
-			wanted[project] = map[string]bool{}
-		}
-		wanted[project][c.Fingerprint()] = true
+type batchTarget struct {
+	Session
+	fingerprint string
+}
+
+func knownBatchTargets(ctx context.Context, entries []BatchConversation, targets []string, project string, unified, global bool) map[batchDestination]batchTarget {
+	project = filepath.Clean(project)
+	if global {
+		project = ""
 	}
-	return indexBatchTargets(ctx, targets, wanted)
+	wanted := map[string]bool{}
+	for _, c := range entries {
+		wanted[c.Fingerprint()] = true
+		if unified {
+			wanted[c.syncContentKey()] = true
+			wanted["session:"+c.SyncIdentity()] = true
+		}
+	}
+	return indexBatchTargets(ctx, targets, map[string]map[string]bool{project: wanted}, global)
+}
+
+func (c BatchConversation) syncContentKey() string {
+	return "content:" + c.SyncIdentity() + "\x00" + c.Fingerprint()
 }
 
 // BatchReceiver indexes local transcripts once, then imports a remote snapshot
 // a conversation at a time without retaining the decoded history of the batch.
 type BatchReceiver struct {
 	targets []string
-	cwd     string
-	known   map[batchDestination]Session
+	project string
+	known   map[batchDestination]batchTarget
 }
 
-func NewBatchReceiver(ctx context.Context, targets []string, cwd string) (*BatchReceiver, error) {
+func NewBatchReceiver(ctx context.Context, targets []string) (*BatchReceiver, error) {
 	if len(targets) == 0 {
 		return nil, errors.New("choose one or more target agents")
 	}
-	if err := CheckBatchTargets(targets, cwd); err != nil {
+	if err := CheckBatchTargets(targets, ""); err != nil {
 		return nil, err
 	}
 	targets = slices.Compact(slices.Sorted(slices.Values(targets)))
-	known := indexBatchTargets(ctx, targets, nil)
-	return &BatchReceiver{targets: targets, cwd: cwd, known: known}, ctx.Err()
+	known := indexBatchTargets(ctx, targets, nil, true)
+	return &BatchReceiver{targets: targets, known: known}, ctx.Err()
 }
 
 func (r *BatchReceiver) Receive(ctx context.Context, c BatchConversation) (int, error) {
-	project, err := batchProject(r.cwd, c.Cwd)
-	if err != nil {
-		return 0, err
+	if r.project == "" {
+		project, err := batchProject("")
+		if err != nil {
+			return 0, err
+		}
+		r.project = project
 	}
 	count := 0
 	var failures []error
@@ -396,7 +448,7 @@ func (r *BatchReceiver) Receive(ctx context.Context, c BatchConversation) (int, 
 		if err := ctx.Err(); err != nil {
 			return count, err
 		}
-		result := importBatchItem(c, target, project, r.known)
+		result := importBatchItem(ctx, c, target, r.project, r.known, true, true)
 		if result.Error != "" {
 			failures = append(failures, fmt.Errorf("importing into %s: %s", target, result.Error))
 		} else if !result.Existing {
@@ -406,13 +458,16 @@ func (r *BatchReceiver) Receive(ctx context.Context, c BatchConversation) (int, 
 	return count, errors.Join(failures...)
 }
 
-func indexBatchTargets(ctx context.Context, targets []string, wanted map[string]map[string]bool) map[batchDestination]Session {
-	known := map[batchDestination]Session{}
+func indexBatchTargets(ctx context.Context, targets []string, wanted map[string]map[string]bool, global bool) map[batchDestination]batchTarget {
+	known := map[batchDestination]batchTarget{}
 	for ref, s := range batchSources() {
 		if ctx.Err() != nil {
 			break
 		}
 		project := filepath.Clean(s.Cwd)
+		if global {
+			project = ""
+		}
 		if ref.WSL != "" || (wanted != nil && wanted[project] == nil) || !slices.Contains(targets, ref.Agent) {
 			continue
 		}
@@ -421,25 +476,57 @@ func indexBatchTargets(ctx context.Context, targets []string, wanted map[string]
 			continue
 		}
 		sum := c.Fingerprint()
+		match := batchTarget{s, sum}
 		key := batchDestination{s.Agent, project, sum}
 		if old, found := known[key]; (wanted == nil || wanted[project][sum]) && (!found || s.ID < old.ID) {
-			known[key] = s
+			known[key] = match
+		}
+		key.fingerprint = c.syncContentKey()
+		if old, found := known[key]; (wanted == nil || wanted[project][key.fingerprint]) && (!found || s.ID < old.ID) {
+			known[key] = match
+		}
+		identity := "session:" + c.SyncIdentity()
+		_, imported := findBatchImport(s)
+		if (c.HasSyncName() || imported) && (wanted == nil || wanted[project][identity]) {
+			key.fingerprint = identity
+			if old, found := known[key]; !found || s.Last.After(old.Last) || s.Last.Equal(old.Last) && s.ID < old.ID {
+				known[key] = match
+			}
 		}
 	}
 	return known
 }
 
-func importBatchItem(c BatchConversation, target, cwd string, existing map[batchDestination]Session) BatchImport {
+func importBatchItem(ctx context.Context, c BatchConversation, target, cwd string, existing map[batchDestination]batchTarget, unified, global bool) BatchImport {
 	r := BatchImport{Agent: target}
 	if !batchDirectory(cwd) {
-		r.Error = "the source project is unavailable here; choose a target project"
+		r.Error = "the destination project directory is unavailable"
 		return r
 	}
-	if old, ok := existing[batchDestination{target, filepath.Clean(cwd), c.Fingerprint()}]; ok {
-		r.Session, r.Command, r.Existing = old.ID, resumeCommand("", target, old.ID, cwd, old.Path), true
+	key := c.Fingerprint()
+	project := filepath.Clean(cwd)
+	if global {
+		project = ""
+	}
+	if unified {
+		key = c.syncContentKey()
+	}
+	if old, ok := existing[batchDestination{target, project, key}]; ok {
+		r.Session, r.Command, r.Existing = old.ID, resumeCommand("", target, old.ID, old.Cwd, old.Path), true
 		return r
 	}
-	s, seen, err := importBatchConversation(c, target, cwd)
+	var s CarryResult
+	var seen bool
+	var err error
+	if unified {
+		old := existing[batchDestination{target, project, "session:" + c.SyncIdentity()}]
+		if batchDirectory(old.Cwd) {
+			cwd = old.Cwd
+		}
+		s, seen, err = applyBatchConversation(ctx, c, target, cwd, old)
+	} else {
+		s, seen, err = importBatchConversation(c, target, cwd)
+	}
 	if err != nil {
 		r.Error = err.Error()
 		return r
@@ -448,14 +535,16 @@ func importBatchItem(c BatchConversation, target, cwd string, existing map[batch
 	return r
 }
 
-func batchProject(override, original string) (string, error) {
+func batchProject(override string) (string, error) {
 	if override != "" {
 		return override, nil
 	}
-	if batchDirectory(original) {
-		return original, nil
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
 	}
-	return os.UserHomeDir()
+	project := filepath.Join(home, "sessions")
+	return project, os.MkdirAll(project, 0o700)
 }
 
 func batchDirectory(p string) bool {
@@ -508,18 +597,14 @@ func importBatchConversation(c BatchConversation, target, cwd string) (CarryResu
 		return CarryResult{}, false, err
 	}
 	r.Command = resumeCommand("", target, r.ID, cwd, r.Path)
-	receipt := batchImportReceipt{CarryResult: r}
+	fingerprint := ""
 	// Hash the native representation, since cross-agent conversion can change
 	// tool items. Later edits will then be exported as ordinary local changes.
 	native := Session{Agent: target, ID: r.ID, Path: r.Path, Cwd: cwd}
 	if created, e := readBatchConversation(context.Background(), BatchSource{Agent: target, ID: r.ID}, native); e == nil {
-		receipt.Fingerprint = created.Fingerprint()
+		fingerprint = created.Fingerprint()
 	}
-	raw, err := json.Marshal(receipt)
-	if err == nil {
-		err = steady.WriteFile(save, raw, 0o600)
-	}
-	return r, already, err
+	return r, already, saveBatchImportReceipt(save, batchImportReceipt{CarryResult: r, Fingerprint: fingerprint})
 }
 
 func batchCarryItems(parts []Part) []carryItem {
@@ -540,17 +625,42 @@ func batchCarryItems(parts []Part) []carryItem {
 
 type batchImportReceipt struct {
 	CarryResult
-	Fingerprint string `json:"fingerprint,omitempty"`
+	Identity        string    `json:"identity,omitempty"`
+	Title           string    `json:"title,omitempty"`
+	Start           time.Time `json:"start,omitzero"`
+	Fingerprint     string    `json:"fingerprint,omitempty"`
+	NextFingerprint string    `json:"nextFingerprint,omitempty"`
 }
 
-func unchangedImport(s Session, c BatchConversation) bool {
+func saveBatchImportReceipt(path string, receipt batchImportReceipt) error {
+	raw, err := json.Marshal(receipt)
+	if err != nil {
+		return err
+	}
+	return steady.WriteFile(path, raw, 0o600)
+}
+
+func findBatchImport(s Session) (batchImportReceipt, bool) {
+	var saved batchImportReceipt
 	if _, err := uuid.Parse(s.ID); err != nil || s.WSL != "" {
-		return false
+		return saved, false
 	}
 	raw, err := os.ReadFile(filepath.Join(settings.Dir(), "session-imports", s.ID+".json"))
 	if err != nil {
-		return false
+		return saved, false
 	}
-	var saved batchImportReceipt
-	return json.Unmarshal(raw, &saved) == nil && saved.Fingerprint != "" && saved.Agent == s.Agent && saved.Path == s.Path && saved.Fingerprint == c.Fingerprint()
+	if json.Unmarshal(raw, &saved) != nil || saved.Agent != s.Agent || saved.ID != s.ID {
+		return saved, false
+	}
+	path := saved.Path
+	if s.Agent == "codex" {
+		path, s.Path = strings.TrimSuffix(path, ".zst"), strings.TrimSuffix(s.Path, ".zst")
+	}
+	return saved, path == s.Path
+}
+
+func unchangedImport(s Session, c BatchConversation) bool {
+	saved, ok := findBatchImport(s)
+	fingerprint := c.Fingerprint()
+	return ok && (saved.Fingerprint == fingerprint || saved.NextFingerprint == fingerprint)
 }

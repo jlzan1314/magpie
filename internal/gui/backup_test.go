@@ -16,7 +16,6 @@ import (
 	"github.com/yetone/magpie/internal/agentenv"
 	"github.com/yetone/magpie/internal/davsync"
 	"github.com/yetone/magpie/internal/library"
-	"github.com/yetone/magpie/internal/sessions"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -47,16 +46,14 @@ func TestSessionPreferencesPersistAcrossSettingsHandlers(t *testing.T) {
 	file := filepath.Join(settings.Dir(), "session-batch-preferences.json")
 	mux := http.NewServeMux()
 	backupRoutes(mux, folderOnly{})
-	if prefs := read(mux); !prefs.All {
+	if prefs := read(mux); !reflect.DeepEqual(prefs, davsync.SessionPreferences{}) {
 		t.Fatalf("default preferences: %+v", prefs)
 	}
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
 		t.Fatalf("reading defaults changed the config file: %v", err)
 	}
 	want := davsync.SessionPreferences{
-		Sources:     []sessions.BatchSource{{Agent: "codex", ID: "example", WSL: "Ubuntu"}},
-		SourceAgent: "codex", Search: "sample", BackupIDs: "previous\nretry",
-		Targets: []string{"codex", "claude"}, Cwd: "/example",
+		Targets: []string{"codex", "claude"},
 	}
 	raw, err := json.Marshal(want)
 	if err != nil {

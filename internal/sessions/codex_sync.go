@@ -182,6 +182,10 @@ func readSyncRollout(root *os.Root, name string, limit int64) ([]byte, error) {
 // lock. Each rollout is replaced atomically and a retry accepts identical
 // segments if an earlier import was interrupted.
 func ImportCodexSnapshot(ctx context.Context, id string, files []CodexRollout) (int, error) {
+	return importCodexSnapshot(ctx, id, files, nil)
+}
+
+func importCodexSnapshot(ctx context.Context, id string, files []CodexRollout, expected *CodexRollout) (int, error) {
 	if err := ValidateCodexSnapshot(id, files); err != nil {
 		return 0, err
 	}
@@ -209,7 +213,10 @@ func ImportCodexSnapshot(ctx context.Context, id string, files []CodexRollout) (
 	if err != nil {
 		return 0, err
 	}
-	if !CodexSnapshotExtends(files, local) {
+	if expected != nil && (len(local) != 1 || local[0].Path != expected.Path || !bytes.Equal(local[0].Data, expected.Data)) {
+		return 0, ErrCodexSyncConflict
+	}
+	if expected == nil && !CodexSnapshotExtends(files, local) {
 		return 0, ErrCodexSyncConflict
 	}
 	if err := os.MkdirAll(folder, 0o700); err != nil {

@@ -59,7 +59,7 @@ type inboxReceipts struct {
 func receiveSessionBackups(ctx context.Context, c Config, p SessionPreferences) (int, error) {
 	targets := slices.Clone(p.Targets)
 	slices.Sort(targets)
-	if err := sessions.CheckBatchTargets(targets, p.Cwd); err != nil {
+	if err := sessions.CheckBatchTargets(targets, ""); err != nil {
 		return 0, err
 	}
 	own, err := sessionDeviceID()
@@ -82,7 +82,7 @@ func receiveSessionBackups(ctx context.Context, c Config, p SessionPreferences) 
 	if list.WebDAVError != "" {
 		return 0, errors.New(list.WebDAVError)
 	}
-	scope := sum([]byte(stateKey(c) + "\x00" + strings.Join(targets, ",") + "\x00" + p.Cwd))
+	scope := sum([]byte(stateKey(c) + "\x00" + strings.Join(targets, ",") + "\x00"))
 	file := path("session-inbox-" + scope + ".json")
 	receipts := inboxReceipts{Backups: map[string]bool{}, Entries: map[string]bool{}}
 	data, err := os.ReadFile(file)
@@ -122,12 +122,12 @@ func receiveSessionBackups(ctx context.Context, c Config, p SessionPreferences) 
 					problems = append(problems, ctx.Err())
 					break
 				}
-				if t.Origin == own || receipts.Entries[t.Revision] {
+				if receipts.Entries[t.Revision] {
 					continue
 				}
 				entry, e := cur.readThread(ctx, t)
 				if e == nil && receiver == nil {
-					receiver, e = sessions.NewBatchReceiver(ctx, targets, p.Cwd)
+					receiver, e = sessions.NewBatchReceiver(ctx, targets)
 				}
 				if e == nil {
 					var n int
@@ -181,7 +181,7 @@ func receiveSessionBackups(ctx context.Context, c Config, p SessionPreferences) 
 				}
 				entry, e := store.readEntry(ctx, m, key)
 				if e == nil && receiver == nil {
-					receiver, e = sessions.NewBatchReceiver(ctx, targets, p.Cwd)
+					receiver, e = sessions.NewBatchReceiver(ctx, targets)
 				}
 				if e == nil {
 					var n int

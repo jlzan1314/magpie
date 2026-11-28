@@ -59,7 +59,7 @@ function serve(lang, posts, remoteGate) {
   };
   let sync = { ...base, sessionsError: longSessionError };
   let activity = {phase:"idle",error:longSessionError};
-  let tokens = 0, previewed = 0, undos = 0, sessionPrefs = { all: true };
+  let tokens = 0, previewed = 0, undos = 0, sessionPrefs = { all: true, cwd: "/old/project" };
   return async (route) => {
     const request = route.request();
     const pathname = new URL(request.url()).pathname;
@@ -74,15 +74,12 @@ function serve(lang, posts, remoteGate) {
     if (pathname === "/api/plugins") return json({ plugins: [] });
     if (pathname === "/api/davsync") return json(new URL(request.url()).searchParams.get("view") === "session-activity" ? activity : sync);
     if (pathname === "/api/davsync/session-candidates") return json({
-      sources: [
-        { agent: "codex", id: "sample", title: "Long title ".repeat(18), cwd: "/project/" + "directory".repeat(28) },
-        { agent: "claude", id: "other", title: "Another conversation", cwd: "/project" },
-      ],
-      targets: ["codex"],
+      targets: ["codex", "claude"],
       preferences: sessionPrefs,
     });
     if (pathname === "/api/davsync/session-preferences") {
       sessionPrefs = post();
+      assert.equal(sessionPrefs.cwd, undefined);
       return route.fulfill({ status: 204 });
     }
     if (pathname === "/api/davsync/session-sync-start") {
@@ -249,6 +246,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await undoRow.waitFor({ state: "detached" });
         assert.equal(await list.locator(".sync-preview-row").count(), 1, "Preview a sync gone after the undo");
         const batch = list.locator(".sync-session-row", { hasText: w("Session sync") });
+        assert.equal(await list.locator(".sync-session-row").count(), 1);
         const syncSessions = batch.getByRole("button", { name: w("Sync sessions now"), exact: true });
         await click(syncSessions);
         const confirmation = page.getByRole("alertdialog");
@@ -257,33 +255,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(all("/api/davsync/session-sync-start").length, 0, "cancel did not start a sync");
         await click(batch.getByRole("button",{name:w("Open"),exact:true}));
         const panel = list.locator(".session-batch-form");
-        const sessions = panel.locator(".session-batch-sources .session-batch-choice");
-        const allSessions = panel.getByRole("checkbox", { name: w("All readable sessions") });
-        assert.ok(await allSessions.isChecked(), "first open selects all sessions");
-        await allSessions.uncheck();
-        await sessions.nth(1).waitFor();
-        const search = panel.getByRole("textbox", { name: w("Filter sessions") });
-        await search.fill("another");
-        assert.equal(await sessions.filter({ visible: true }).count(), 1);
-        await search.clear();
-        await panel.getByRole("button", { name: w("Source agent") }).click();
-        await page.getByRole("menuitemradio", { name: "Codex", exact: true }).click();
-        assert.equal(await sessions.filter({ visible: true }).count(), 1);
-        assert.match(await sessions.filter({ visible: true }).textContent(), /Long title/);
-        const geometry = await panel.evaluate((form) => {
-          const list = form.querySelector(".session-batch-sources");
-          const destinations = form.querySelector(".session-batch-targets");
-          const backup = form.querySelector("textarea");
-          const err = document.querySelector(".session-batch-error");
-          const box = (node) => node.getBoundingClientRect();
-          return {
-            alignedFields: Math.abs(box(list).left - box(backup).left) < 1 && Math.abs(box(list).width - box(backup).width) < 1,
-            separateRows: box(backup).top >= box(list).bottom && box(destinations).top >= box(backup).bottom,
-            listFits: list.scrollWidth <= list.clientWidth + 1,
-            errorFits: !!err.closest(".sync-session-row") && err.scrollWidth <= err.clientWidth + 1,
-          };
-        });
-        assert.deepEqual(geometry, { alignedFields: true, separateRows: true, listFits: true, errorFits: true });
+        const targets = panel.getByRole("group", { name: w("Import into agents") });
+        const codex = targets.getByRole("checkbox", { name: "Codex" });
+        const claude = targets.getByRole("checkbox", { name: "Claude Code" });
+        await claude.waitFor();
+        const apply = panel.getByRole("button", { name: w("Merge and apply"), exact: true });
+        assert.ok(await apply.isDisabled(), "an import requires at least one target");
+        assert.equal(await panel.getByRole("textbox").count(), 0);
         await noneWider(page, ".session-batch-form, .session-batch-form .bar > button");
         if (process.env.ARTIFACT_DIR) {
           await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
@@ -303,35 +281,28 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await batch.getByText(w("Remote files match packed size · skipped {skipped}",{skipped:2}),{exact:true}).waitFor();
         assert.equal(all("/api/davsync/session-sync-start").length,2);
 
-        await sessions.filter({ visible: true }).getByRole("checkbox").check();
-        await search.fill("Long title");
-        await panel.getByRole("textbox", { name: w("Existing backup IDs") }).fill("example");
-        await panel.getByRole("group", { name: w("Import into agents") }).getByRole("checkbox", { name: "Codex" }).check();
+        await codex.check();
         const autoImport = panel.getByRole("checkbox",{name:w("Import remote sessions into selected agents on WebDAV sync")});
         assert.equal(await autoImport.isChecked(), false);
-        await autoImport.check();
         const savedDraft = page.waitForResponse(response => response.status() === 204 &&
           response.url().endsWith("/api/davsync/session-preferences") &&
-          response.request().postDataJSON()?.cwd === "/fixture/project");
-        assert.equal(await panel.getByRole("textbox", {name:w("Target project folder")}).count(),0);
-        await click(panel.locator(".session-batch-advanced > summary"));
-        await panel.getByRole("textbox", { name: w("Target project folder") }).fill("/fixture/project");
+          response.request().postDataJSON()?.autoImport === true);
+        await autoImport.check();
         await savedDraft;
         await page.goto("http://magpie.test/?view=settings&tab=sync");
         await batch.waitFor({state:"visible"});
         await click(batch.getByRole("button",{name:w("Open"),exact:true}));
-        await panel.getByRole("textbox", { name: w("Target project folder") }).waitFor();
-        await page.waitForFunction(() =>
-          [...document.querySelectorAll(".session-batch-form input")].some(input => input.value === "/fixture/project"));
-        assert.equal(await allSessions.isChecked(), false);
-        assert.equal(await search.inputValue(), "Long title");
+        await codex.waitFor();
         assert.ok(await autoImport.isChecked(), "automatic import survives reopening Settings");
-        assert.equal(await panel.getByRole("button", { name: w("Source agent") }).textContent(), "Codex");
-        assert.equal(await sessions.filter({ visible: true }).count(), 1);
-        assert.ok(await sessions.filter({ visible: true }).getByRole("checkbox").isChecked());
-        assert.equal(await panel.getByRole("textbox", { name: w("Existing backup IDs") }).inputValue(), "example");
-        assert.ok(await panel.getByRole("group", { name: w("Import into agents") }).getByRole("checkbox", { name: "Codex" }).isChecked());
+        assert.ok(await codex.isChecked());
+        assert.ok(!(await claude.isChecked()));
         assert.equal(all("/api/davsync/session-sync-start").length, 2, "editing a draft did not start a transfer");
+        await click(apply);
+        await page.getByRole("alertdialog").getByRole("button", { name: w("Merge and apply"), exact: true }).click();
+        const batchReq = await waitPosts("/api/davsync/session-batch", 1);
+        assert.equal(batchReq.current, true);
+        assert.deepEqual(batchReq.targets, ["codex"]);
+        assert.equal(batchReq.cwd, undefined);
         const manager=panel.locator(".session-batch-manager");
         await click(manager.locator("summary").first());
         await manager.getByText("Laptop · Restore fixture").waitFor();
@@ -341,11 +312,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await click(manager.getByRole("button",{name:"Restore fixture",exact:true}));
         await click(panel.getByRole("button",{name:w("Import"),exact:true}));
         releaseRemote(); // the local restore was usable throughout a stalled remote listing
-        const restore = await waitPosts("/api/davsync/session-batch",1);
+        const restore = await waitPosts("/api/davsync/session-batch",2);
         assert.deepEqual(restore.backups,["snapshot"]);
         assert.equal(restore.entry,"thread");
-        assert.equal(restore.all,false);
-        assert.deepEqual(restore.sources,[]);
+        assert.equal(restore.current,false);
+        assert.deepEqual(restore.targets,["codex"]);
         assert.deepEqual(errors, []);
       });
     }
