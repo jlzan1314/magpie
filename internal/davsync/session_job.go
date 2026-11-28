@@ -125,7 +125,7 @@ func SessionSyncActivity() SessionActivity {
 	st := loadState()
 	if st.Key == key && st.Sessions != nil {
 		s := st.Sessions
-		v.Imported, v.ImportedAt, v.ImportError = s.Imported, s.ImportedAt, s.ImportError
+		v.Imported, v.ImportedAt, v.ImportError = s.Imported, s.ImportedAt, sessionImportDiagnostic(s.ImportError)
 		v.Latest, v.Last, v.Failed = s.Backup, s.At, s.Failed
 		if job == nil {
 			v.Conversations, v.Uploaded, v.Skipped = s.Conversations, s.Uploaded, s.Skipped

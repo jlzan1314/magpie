@@ -298,6 +298,9 @@ verified backup. Reopening the page attaches to the running task. Transient
 network errors back off for 2, 4, 8 and 16 seconds; a longer Retry-After
 takes precedence. Retry now can wake a local backoff. A prepared explicit
 upload is recovered at startup even on a manual schedule.
+Automatic import skips work after sync is canceled and omits cancellation
+diagnostics from saved import status. WebDAV failures and timeouts still
+appear on the session sync row.
 
 A source that cannot be read, or a conversation object rejected by the
 server, is reported with its title and source. A partial remote snapshot
