@@ -314,7 +314,16 @@ are created on demand and searched within the selected backup. Refresh and
 close cancel outstanding listing requests.
 
 **Import remote sessions into selected agents on WebDAV sync** applies
-revisions on subsequent syncs. Codex and Claude Code imports retain the
+revisions on subsequent syncs. Automatic import and **Merge and apply**
+select up to 200 shared conversations by last activity, using creation time
+when last activity is unavailable. Automatic import skips received revisions
+within that window. Sessions outside the window stay in WebDAV and in any
+agent that already imported them. Explicit recovery can still read older
+conversations. On servers with only legacy batch backups, automatic import
+uses the newest backup collections and their stored entry order to select up
+to 200 distinct transcripts.
+
+Codex and Claude Code imports retain the
 original creation timestamp and reuse their previously imported session ID.
 An empty remote library can be rebuilt from any readable local copy.
 Codex rewrites use its native writer lock. New imports use `~/sessions`,
