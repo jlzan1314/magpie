@@ -5819,20 +5819,6 @@ body.linux .action-confirm::backdrop { -webkit-backdrop-filter: none; backdrop-f
 .relay-wait { font-size: 12px; }
 
 .session-batch-form > label { overflow-wrap: anywhere; }
-.session-batch-filters .proto { flex: none; max-width: 50%; }
-.session-batch-sources {
-  max-block-size: min(320px, 45vh);
-  overflow-y: auto;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--card);
-}
-.editor .session-batch-sources > label.tick {
-  align-items: flex-start;
-  padding: 7px 10px;
-}
-.editor .session-batch-sources > label.tick + label.tick { border-top: 1px solid var(--line-2); }
-.editor .session-batch-sources > label.tick input { margin-top: 2px; }
 .session-batch-choice > input { flex: none; }
 .session-batch-choice > span,
 .session-batch-form code,
@@ -5840,7 +5826,6 @@ body.linux .action-confirm::backdrop { -webkit-backdrop-filter: none; backdrop-f
   min-inline-size: 0;
   overflow-wrap: anywhere;
 }
-.session-batch-sources .session-batch-choice .sub { display: block; color: var(--muted); font-size: 11px; }
 .session-batch-form [hidden], .session-batch-output:empty { display: none; }
 .session-batch-manager > .stack { margin-inline-start: var(--ed-at, 86px); }
 .session-batch-backup,

@@ -81,6 +81,8 @@ func TestSessionBatch(t *testing.T) {
 	useHome := func(home string) {
 		t.Helper()
 		sessions.Reset()
+		t.Setenv("HOME", home)
+		t.Setenv("USERPROFILE", home)
 		t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
 		t.Setenv("CODEX_HOME", filepath.Join(home, "codex"))
 		t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
@@ -165,7 +167,7 @@ func TestSessionBatch(t *testing.T) {
 	writeCodex("First result.")
 	sessions.Reset()
 	second, err := RunSessionBatch(ctx, SessionBatchRequest{Sources: picked[:1], Backups: []string{first.Backup}})
-	if err != nil || second.Conversations != 2 || second.Backup != first.Backup {
+	if err != nil || second.Conversations != 1 || second.Backup != first.Backup {
 		t.Fatalf("append merge: %+v, %v", second, err)
 	}
 	writeCodex("Different result.")
@@ -177,16 +179,16 @@ func TestSessionBatch(t *testing.T) {
 	}
 	publishFailure.Store(false)
 	third, err := RunSessionBatch(ctx, SessionBatchRequest{Sources: picked[:1], Backups: []string{second.Backup}})
-	if err != nil || third.Backup != first.Backup || third.Conversations != 2 {
-		t.Fatalf("branch preservation and backup retry: %+v, %v", third, err)
+	if err != nil || third.Backup != first.Backup || third.Conversations != 1 {
+		t.Fatalf("replacement and backup retry: %+v, %v", third, err)
 	}
 	useHome(to)
 	if err := SetFollowServer(true); err != nil {
 		t.Fatal(err)
 	}
-	restore := SessionBatchRequest{Backups: []string{third.Backup}, Targets: []string{"codex", "claude", "codex"}, Cwd: project}
+	restore := SessionBatchRequest{Backups: []string{third.Backup}, Targets: []string{"codex", "claude", "codex"}}
 	targets, err := RunSessionBatch(ctx, restore)
-	if err != nil || len(targets.Imports) != 4 {
+	if err != nil || len(targets.Imports) != 2 {
 		t.Fatalf("distribution: %+v, %v", targets, err)
 	}
 	for _, item := range targets.Imports {
@@ -200,12 +202,15 @@ func TestSessionBatch(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s can't find %s", item.Agent, item.Session)
 		}
+		if s.Cwd != filepath.Join(to, "sessions") {
+			t.Fatalf("%s imported into %q", item.Agent, s.Cwd)
+		}
 		if transcript, err := sessions.TranscriptOf(s); err != nil || len(transcript.Parts) == 0 {
 			t.Fatalf("%s can't read the imported transcript: %v", item.Agent, err)
 		}
 	}
 	again, err := RunSessionBatch(ctx, restore)
-	if err != nil || len(again.Imports) != 4 {
+	if err != nil || len(again.Imports) != 2 {
 		t.Fatalf("repeat: %+v, %v", again, err)
 	}
 	for i, item := range again.Imports {

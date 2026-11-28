@@ -2,7 +2,9 @@ package davsync
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http/httptest"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/backup"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/sessions"
 )
 
@@ -89,6 +92,8 @@ func TestScheduledWebDAVImportsAndSkipsReturnedSessions(t *testing.T) {
 	defer server.Close()
 	config := Config{URL: server.URL + "/dav", User: "me", Password: "pw", Passphrase: "automatic transfer", Sessions: true}
 	source, dest, project := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("HOME", dest)
+	t.Setenv("USERPROFILE", dest)
 	ctx := context.Background()
 	backupTestHome(t, source, config)
 	backupTestThread(t, testThreadA, "shared through the schedule", project)
@@ -106,7 +111,7 @@ func TestScheduledWebDAVImportsAndSkipsReturnedSessions(t *testing.T) {
 	if items := sessions.BatchCandidates(); len(items) != 0 {
 		t.Fatalf("manual choice triggered import: %v", items)
 	}
-	prefs := SessionPreferences{AutoImport: true, Targets: []string{"codex", "claude"}, All: true, Cwd: project}
+	prefs := SessionPreferences{AutoImport: true, Targets: []string{"codex", "claude"}}
 	if err := SaveSessionPreferences(prefs); err != nil {
 		t.Fatal(err)
 	}
@@ -148,6 +153,16 @@ func TestScheduledWebDAVImportsAndSkipsReturnedSessions(t *testing.T) {
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("import echo: %d %v", len(entries), err)
 	}
+	if err := SetFollowServer(false); err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteSessionBackup(ctx, currentSessionID, "webdav"); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, err := SyncLocalSessions(ctx)
+	if err != nil || rebuilt.Conversations != 1 || rebuilt.Duplicates != 1 || !rebuilt.Remote {
+		t.Fatalf("rebuilding from imported copies: %+v %v", rebuilt, err)
+	}
 	var codex sessions.BatchCandidate
 	for _, s := range before {
 		if s.Agent == "codex" {
@@ -171,6 +186,157 @@ func TestScheduledWebDAVImportsAndSkipsReturnedSessions(t *testing.T) {
 	entries, _, err = sessions.CollectOutgoingBatch(ctx, nil, true)
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("edited import not exportable: %d %v", len(entries), err)
+	}
+}
+
+func TestScheduledWebDAVOverwritesSharedSessionAndKeepsCreationTime(t *testing.T) {
+	server := httptest.NewServer(newSizeAwareDAV())
+	defer server.Close()
+	config := Config{URL: server.URL + "/dav", User: "me", Password: "pw", Passphrase: "automatic revisions", Sessions: true}
+	source, dest, project := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("HOME", dest)
+	t.Setenv("USERPROFILE", dest)
+	ctx := context.Background()
+	prefs := SessionPreferences{AutoImport: true, Targets: []string{"codex", "claude"}}
+	creation := time.Date(2026, time.November, 25, 10, 0, 0, 123456789, time.UTC)
+	publish := func(id, stamp, text string) {
+		t.Helper()
+		backupTestHome(t, source, config)
+		backupTestThread(t, id, "starting question", project)
+		file := filepath.Join(os.Getenv("CODEX_HOME"), "sessions", "2026", "11", "25", "rollout-2026-11-25T10-00-00-"+id+".jsonl")
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte(strings.ReplaceAll(string(raw), "2026-11-25T10:00:00Z", creation.Format(time.RFC3339Nano))), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if text != "" {
+			f, err := os.OpenFile(file, os.O_APPEND|os.O_WRONLY, 0600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = json.NewEncoder(f).Encode(map[string]any{"type": "response_item", "timestamp": stamp, "payload": map[string]any{
+				"type": "message", "role": "assistant", "content": []map[string]string{{"type": "output_text", "text": text}},
+			}}); err != nil {
+				f.Close()
+				t.Fatal(err)
+			}
+			if err = f.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := SyncLocalSessions(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	receive := func() []sessions.BatchCandidate {
+		t.Helper()
+		backupTestHome(t, dest, config)
+		if _, err := receiveSessionBackups(ctx, config, prefs); err != nil {
+			t.Fatal(err)
+		}
+		sessions.Reset()
+		return sessions.BatchCandidates()
+	}
+	publish(testThreadA, "", "")
+	initial := receive()
+	if len(initial) != 2 {
+		t.Fatalf("initial import: %d sessions", len(initial))
+	}
+	ids := map[string]string{}
+	for _, item := range initial {
+		ids[item.Agent] = item.ID
+		if native, ok := sessions.Find(item.Agent, item.ID); !ok || native.Cwd != filepath.Join(dest, "sessions") {
+			t.Fatalf("%s imported into %q", item.Agent, native.Cwd)
+		}
+	}
+	publish(testThreadA, "2026-11-25T10:01:00Z", "only the appended answer")
+	backupTestHome(t, dest, config)
+	locks := filepath.Join(os.Getenv("CODEX_HOME"), "thread-writer-locks")
+	if err := os.MkdirAll(locks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	release, ok := filelock.Lock(filepath.Join(locks, ids["codex"]+".lock"), filelock.Wait)
+	if !ok {
+		t.Fatal("could not hold the Codex writer lock")
+	}
+	_, blocked := receiveSessionBackups(ctx, config, prefs)
+	release()
+	if blocked == nil {
+		t.Fatal("automatic import advanced a session held open by Codex")
+	}
+	if entries, _, err := sessions.CollectOutgoingBatch(ctx, nil, true); err != nil || len(entries) != 0 {
+		t.Fatalf("blocked import echoed back: %d %v", len(entries), err)
+	}
+	check := func(text string) {
+		t.Helper()
+		updated := receive()
+		if len(updated) != 2 {
+			t.Fatalf("update created a new native session: %d sessions", len(updated))
+		}
+		for _, item := range updated {
+			if item.ID != ids[item.Agent] {
+				t.Fatalf("%s session ID changed: %s", item.Agent, item.ID)
+			}
+			if native, ok := sessions.Find(item.Agent, item.ID); !ok || !native.Start.Equal(creation) {
+				t.Fatalf("%s native creation time: %s", item.Agent, native.Start)
+			}
+			entries, err := sessions.CollectBatch(ctx, []sessions.BatchSource{item.BatchSource}, false)
+			if err != nil || len(entries) != 1 || len(entries[0].Parts) != 2 || entries[0].Parts[1].Text != text || !entries[0].Start.Equal(creation) {
+				t.Fatalf("%s import: %+v %v", item.Agent, entries, err)
+			}
+		}
+		if entries, _, err := sessions.CollectOutgoingBatch(ctx, nil, true); err != nil || len(entries) != 0 {
+			t.Fatalf("updated import echoed back: %d %v", len(entries), err)
+		}
+	}
+	check("only the appended answer")
+	publish(testThreadB, "2026-11-25T10:02:00Z", "a replacement from another native ID")
+	check("a replacement from another native ID")
+	dav, _ := newDAV(config)
+	head, err := currentStore(config, dav).readLibrary(ctx, true)
+	if err != nil || len(head.Threads) != 1 {
+		t.Fatalf("expected one shared session: %d %v", len(head.Threads), err)
+	}
+	for key, thread := range head.Threads {
+		if len(thread.Pieces) != 1 || thread.Pieces[0].Collection != key {
+			t.Fatalf("replacement escaped the original session directory: %+v", thread.Pieces)
+		}
+	}
+
+	applyHome := t.TempDir()
+	t.Setenv("HOME", applyHome)
+	t.Setenv("USERPROFILE", applyHome)
+	backupTestHome(t, applyHome, config)
+	localProject := t.TempDir()
+	backupTestThread(t, testThreadC, "starting question", localProject)
+	native, ok := sessions.Find("codex", testThreadC)
+	if !ok {
+		t.Fatal("missing native target session")
+	}
+	raw, err := os.ReadFile(native.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(native.Path, bytes.ReplaceAll(raw, []byte("2026-11-25T10:00:00Z"), []byte(creation.Format(time.RFC3339Nano))), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sessions.Reset()
+	result, err := RunSessionBatch(ctx, SessionBatchRequest{Current: true, Targets: []string{"codex"}})
+	if err != nil || result.Conversations != 1 || len(result.Imports) != 1 || result.Imports[0].Error != "" || result.Imports[0].Session != testThreadC {
+		t.Fatalf("merge and apply to an existing native session: %+v %v", result, err)
+	}
+	sessions.Reset()
+	if items := sessions.BatchCandidates(); len(items) != 1 || items[0].Cwd != localProject {
+		t.Fatalf("applying to one target created another session: %+v", items)
+	}
+	if updated, ok := sessions.Find("codex", testThreadC); !ok || !updated.Start.Equal(creation) {
+		t.Fatalf("native target creation time: %s", updated.Start)
+	}
+	entries, err := sessions.CollectBatch(ctx, []sessions.BatchSource{{Agent: "codex", ID: testThreadC}}, false)
+	if err != nil || len(entries) != 1 || len(entries[0].Parts) != 2 || entries[0].Parts[1].Text != "a replacement from another native ID" {
+		t.Fatalf("native target was not updated: %+v %v", entries, err)
 	}
 }
 

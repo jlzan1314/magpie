@@ -168,7 +168,11 @@ func (s batchStore) checkManifestFiles(ctx context.Context, m batchManifest, rem
 		if s.current {
 			collection = currentSessionDir
 		}
-		sizes, err = s.dav.listRemoteSizes(ctx, folder, dir, collection)
+		dirs := []string{folder, dir, collection}
+		if s.threadKey != "" {
+			dirs = append(dirs, "threads", s.threadKey)
+		}
+		sizes, err = s.dav.listRemoteSizes(ctx, dirs...)
 		if err != nil {
 			return err
 		}
@@ -188,7 +192,8 @@ func (s batchStore) checkManifestFiles(ctx context.Context, m batchManifest, rem
 			continue
 		}
 		if sizes != nil {
-			if n, ok := sizes[s.remoteObjectPath(o.kind, o.id)[2]]; !ok || n.size == 0 {
+			p := s.remoteObjectPath(o.kind, o.id)
+			if n, ok := sizes[p[len(p)-1]]; !ok || n.size == 0 {
 				return errors.New("missing session backup file")
 			}
 		} else {

@@ -102,7 +102,7 @@ func writeSessionArchive(ctx context.Context, w io.Writer, pass, folder string) 
 			}
 		}
 	}
-	plan, err := store.prepareCurrent(ctx, previous.Library, nil, true, false, nil)
+	plan, err := store.prepareLocalArchive(ctx, previous.Library)
 	if err != nil {
 		return "", err
 	}

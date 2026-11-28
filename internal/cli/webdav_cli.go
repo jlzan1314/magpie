@@ -31,7 +31,7 @@ const webdavUsage = `usage:
                                           password= and passphrase= ask for a new one
   magpie webdav now                       sync now (the gateway also syncs by itself while it runs: see auto)
   magpie webdav sessions sync             sync local readable conversations and report transferred or skipped files
-  magpie webdav sessions auto-import [--to codex,claude [--cwd path] | off]
+  magpie webdav sessions auto-import [--to codex,claude | off]
                                          set automatic import on this computer
   magpie webdav sessions list             list the readable session sources
   magpie webdav sessions backups          list local and WebDAV session backups

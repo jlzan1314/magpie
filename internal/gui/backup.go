@@ -139,7 +139,6 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 			Name       string
 			Sessions   *bool
 			Targets    []string
-			Cwd        string
 			SignIns    *bool
 			Passphrase string // empty uses the saved local backup passphrase
 		}
@@ -198,7 +197,7 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 				err = w.OpenFolder(dir)
 			}
 		case "restore-sessions":
-			out, e := davsync.RestoreAutoSessions(r.Context(), in.Name, in.Passphrase, in.Cwd, in.Targets)
+			out, e := davsync.RestoreAutoSessions(r.Context(), in.Name, in.Passphrase, "", in.Targets)
 			if e != nil {
 				fail(rw, e)
 				return
@@ -253,7 +252,7 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 		case "session-candidates":
 			prefs, err := davsync.LoadSessionPreferences()
 			candidates := map[string]any{
-				"sources": sessions.BatchCandidates(), "targets": sessions.BatchImportTargets(), "preferences": prefs,
+				"targets": sessions.BatchImportTargets(), "preferences": prefs,
 			}
 			if err != nil {
 				candidates["preferencesError"] = err.Error()
@@ -298,6 +297,7 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 				fail(rw, err)
 				return
 			}
+			in.Cwd = ""
 			result, err := davsync.RunSessionBatch(sessionUploadContext(ctx), in)
 			out := struct {
 				davsync.SessionBatchResult

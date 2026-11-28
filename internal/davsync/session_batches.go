@@ -42,6 +42,7 @@ func (b *batchGzipBuffer) Write(p []byte) (int, error) {
 }
 
 type SessionBatchRequest struct {
+	Current bool                   `json:"current,omitempty"`
 	Sources []sessions.BatchSource `json:"sources"`
 	All     bool                   `json:"all"`
 	Entry   string                 `json:"entry,omitempty"`
@@ -77,8 +78,9 @@ type batchManifest struct {
 }
 
 type batchStore struct {
-	headKey    string // device shard when reading the shared collection
-	current    bool   // stable shared DAV collection
+	headKey    string // shared catalog or a legacy device manifest
+	threadKey  string
+	current    bool // stable shared DAV collection
 	localRoot  string
 	archive    fs.FS
 	dav        *dav
@@ -109,6 +111,13 @@ func runSessionBatch(ctx context.Context, c Config, req SessionBatchRequest, onP
 		return result, err
 	}
 	store := batchStore{dav: d, passphrase: c.Passphrase}
+	if req.Current {
+		if len(req.Targets) == 0 {
+			return result, errors.New("choose one or more target agents")
+		}
+		req.All = !c.FollowServer
+		req.Backups = []string{currentSessionID}
+	}
 	if err := sessions.CheckBatchTargets(req.Targets, strings.TrimSpace(req.Cwd)); err != nil {
 		return result, err
 	}
@@ -159,7 +168,7 @@ func runSessionBatch(ctx context.Context, c Config, req SessionBatchRequest, onP
 				entries = append(entries, entry)
 			}
 		}
-		result.Imports, err = sessions.ImportBatch(ctx, sessions.MergeBatch(entries), req.Targets, strings.TrimSpace(req.Cwd))
+		result.Imports, err = sessions.ApplyBatch(ctx, entries, req.Targets, strings.TrimSpace(req.Cwd))
 		return result, err
 	}
 	collect := sessions.CollectAvailableBatch
@@ -188,6 +197,9 @@ func runSessionBatch(ctx context.Context, c Config, req SessionBatchRequest, onP
 		return result, errEmptySessionBatch
 	}
 	merged := sessions.MergeBatch(entries)
+	if !build && len(req.Backups) == 1 && req.Backups[0] == currentSessionID {
+		merged = entries
+	}
 	result.Conversations = len(merged)
 	result.Duplicates = len(entries) - len(merged)
 	if build {
@@ -213,7 +225,11 @@ func runSessionBatch(ctx context.Context, c Config, req SessionBatchRequest, onP
 				return result, err
 			}
 		}
-		result.Imports, err = sessions.ImportBatch(ctx, merged, req.Targets, strings.TrimSpace(req.Cwd))
+		if !build && req.Backups[0] == currentSessionID {
+			result.Imports, err = sessions.ApplyBatch(ctx, merged, req.Targets, strings.TrimSpace(req.Cwd))
+		} else {
+			result.Imports, err = sessions.ImportBatch(ctx, merged, req.Targets, strings.TrimSpace(req.Cwd))
+		}
 	}
 	return result, err
 }
@@ -421,20 +437,22 @@ func (s batchStore) publishFrom(ctx context.Context, objects []batchObject, mani
 func (s batchStore) publishObject(ctx context.Context, object batchObject, size int64, sizes map[string]remoteSessionFile, previous batchStore, previousSizes map[string]remoteSessionFile, ready *bool) (bool, error) {
 	kind, id := object.kind, object.id
 	target := s.url(kind, id)
-	same, exists, err := s.dav.remoteSizeMatches(ctx, target, size, sizes, s.remoteObjectPath(kind, id)[2])
+	objectPath := s.remoteObjectPath(kind, id)
+	name := objectPath[len(objectPath)-1]
+	same, exists, err := s.dav.remoteSizeMatches(ctx, target, size, sizes, name)
 	if err != nil {
 		return false, err
 	}
 	if same {
-		match, err := s.receiptMatches(ctx, kind, id, size, sizes[s.remoteObjectPath(kind, id)[2]].etag)
+		match, err := s.receiptMatches(ctx, kind, id, size, sizes[name].etag)
 		if err != nil || match {
 			return match, err
 		}
 	}
 	if !*ready {
-		dirs := s.remoteObjectPath(kind, id)
-		for _, dirs := range [][]string{{folder}, {folder, dirs[0]}, {folder, dirs[0], dirs[1]}} {
-			if err := s.dav.ensureSessionCollection(ctx, dirs); err != nil {
+		dirs := append([]string{folder}, objectPath[:len(objectPath)-1]...)
+		for n := 1; n <= len(dirs); n++ {
+			if err := s.dav.ensureSessionCollection(ctx, dirs[:n]); err != nil {
 				return false, err
 			}
 		}
@@ -581,6 +599,23 @@ func resumeSessionBatch(ctx context.Context, c Config, id, remoteDir string) (Se
 	cur := currentStore(c, d)
 	plan, e := cur.readPlan(id)
 	if e == nil {
+		if !plan.Unified {
+			legacy, err := cur.readLibrary(ctx, true)
+			if err != nil {
+				return result, err
+			}
+			changes := map[string]currentChange{}
+			for _, ch := range plan.Changes {
+				key := ch.Thread.identity()
+				if previous := changes[key].Thread; preferCurrentThread(ch.Thread, previous) {
+					changes[key] = ch
+				}
+			}
+			plan.Changes, plan.Checks, plan.Unified = changes, nil, true
+			if err := cur.moveLegacyPieces(ctx, &plan, legacy); err != nil {
+				return result, err
+			}
+		}
 		return cur.commitPlan(ctx, plan)
 	}
 	if !errors.Is(e, fs.ErrNotExist) {
@@ -743,7 +778,15 @@ func (s batchStore) remoteObjectPath(kind, id string) []string {
 		parts[0] = sessionDAVDir
 		parts[2] = "session_" + parts[2]
 	}
+	if s.threadKey != "" {
+		return []string{parts[0], parts[1], "threads", s.threadKey, parts[2]}
+	}
 	return parts
+}
+
+func (s batchStore) inThread(key string) batchStore {
+	s.threadKey = key
+	return s
 }
 
 func (s batchStore) keepLocal(kind, id string, plain []byte) ([]byte, error) {

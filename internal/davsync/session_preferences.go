@@ -12,26 +12,16 @@ import (
 	"github.com/yetone/magpie/internal/steady"
 )
 
-// SessionPreferences holds this device's draft for the session batch form.
-// A draft may be saved before the user has chosen to run any transfer.
 type SessionPreferences struct {
-	AutoImport  bool                   `json:"autoImport,omitempty"`
-	ImportScope string                 `json:"importScope,omitempty"`
-	Entry       string                 `json:"entry,omitempty"`
-	EntryTitle  string                 `json:"entryTitle,omitempty"`
-	All         bool                   `json:"all"`
-	Sources     []sessions.BatchSource `json:"sources,omitempty"`
-	SourceAgent string                 `json:"sourceAgent,omitempty"`
-	Search      string                 `json:"search,omitempty"`
-	BackupIDs   string                 `json:"backupIDs,omitempty"`
-	Targets     []string               `json:"targets,omitempty"`
-	Cwd         string                 `json:"cwd,omitempty"`
+	AutoImport  bool     `json:"autoImport,omitempty"`
+	ImportScope string   `json:"importScope,omitempty"`
+	Targets     []string `json:"targets,omitempty"`
 }
 
 func sessionPreferencesPath() string { return path("session-batch-preferences.json") }
 
 func LoadSessionPreferences() (SessionPreferences, error) {
-	prefs := SessionPreferences{All: true}
+	var prefs SessionPreferences
 	raw, err := os.ReadFile(sessionPreferencesPath())
 	if errors.Is(err, fs.ErrNotExist) {
 		return prefs, nil
@@ -40,7 +30,7 @@ func LoadSessionPreferences() (SessionPreferences, error) {
 		return prefs, err
 	}
 	if err := json.Unmarshal(raw, &prefs); err != nil {
-		return SessionPreferences{All: true}, err
+		return SessionPreferences{}, err
 	}
 	if prefs.AutoImport {
 		c, ok := Load()

@@ -170,10 +170,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.ok(posts.some(x=>x.action==="set" && x.body.sessions && !x.body.signIns));
         await list.getByRole("button",{name:w("Restore sessions…"),exact:true}).first().click();
         const restoreSessions=page.locator(".restore-ask").filter({has:page.getByRole("checkbox",{name:"Codex"})});
+        assert.equal(await restoreSessions.locator("details").count(), 0);
         await restoreSessions.getByRole("checkbox",{name:"Codex"}).check();
         await restoreSessions.getByRole("button",{name:w("Import"),exact:true}).click();
         await restoreSessions.waitFor({state:"detached"});
-        assert.deepEqual(posts.find(x=>x.action==="restore-sessions").body.targets, ["codex"]);
+        const restoreRequest = posts.find(x=>x.action==="restore-sessions").body;
+        assert.deepEqual(restoreRequest.targets, ["codex"]);
+        assert.equal(restoreRequest.cwd, undefined);
 
         // nothing wider than the window, the long folder wrapping
         const wide = await page.evaluate(() => {
@@ -213,14 +216,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
         // Restore asks first; Cancel posts nothing
         const restores = () => posts.filter((p) => p.action === "restore").length;
-        await list.locator(".auto-backup-version").first().locator("button", { hasText: w("Restore…") }).click();
+        const restoreVersion = list.locator(".auto-backup-version").first().getByRole("button", { name: w("Restore…"), exact: true });
+        await restoreVersion.click();
         const ask = page.locator(".auto-backup-ask");
         await ask.waitFor({ state: "visible" });
         assert.ok((await ask.textContent()).includes(w("What is here now is backed up first: restore that one to undo this.")));
         await ask.locator("button", { hasText: w("Cancel") }).click();
         await ask.waitFor({ state: "detached" });
         assert.equal(restores(), 0);
-        await list.locator(".auto-backup-version").first().locator("button", { hasText: w("Restore…") }).click();
+        await restoreVersion.click();
         await ask.waitFor({ state: "visible" });
         await ask.locator("button.primary").click();
         await page.locator(".auto-backup-said").first().waitFor({ state: "visible" });

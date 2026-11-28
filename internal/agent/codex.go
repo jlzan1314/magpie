@@ -378,7 +378,9 @@ func codexIn(at place) *Agent {
 			os.Remove(catalogPath)
 		}
 	}
-	asProvider := func() bool { return get("model_provider") == magpieID }
+	custom := codexCustomRoute{path: path, key: at.key("codex.custom_provider")}
+	customRouted := custom.routed
+	asProvider := func() bool { return get("model_provider") == magpieID || customRouted() }
 	viaBase := func() bool {
 		u := get("openai_base_url")
 		return isCodexGatewayOn(u, at.host()) || strings.TrimSuffix(u, "/") == at.codexURL()
@@ -733,7 +735,7 @@ func codexIn(at place) *Agent {
 	// config at all ("Model provider `magpie` not found"), the app and the
 	// CLI both, whatever the model.
 	namesMagpie := func() bool {
-		if asProvider() {
+		if get("model_provider") == magpieID {
 			return true
 		}
 		names, _ := edit.TOMLTables(path)
@@ -749,6 +751,12 @@ func codexIn(at place) *Agent {
 	// dropProvider takes magpie out as the provider Codex is on; the table
 	// stays for the threads started on it
 	dropProvider := func() error {
+		if custom.managed() {
+			if err := custom.restore(ownCatalog(get("model_catalog_json"))); err != nil {
+				return err
+			}
+			dropList()
+		}
 		if !asProvider() {
 			return nil
 		}
@@ -1754,7 +1762,7 @@ func codexIn(at place) *Agent {
 		if err := giveTables(); err != nil {
 			return "", err
 		}
-		if !routed() {
+		if !routed() && !(custom.managed() && ownCatalog(get("model_catalog_json"))) {
 			return "", nil
 		}
 		if err := dropSubagent(); err != nil {
@@ -1833,6 +1841,9 @@ func codexIn(at place) *Agent {
 			if err := dropMirrorFailover(); err != nil {
 				return err
 			}
+			if err := custom.restore(ownCatalog(get("model_catalog_json"))); err != nil {
+				return err
+			}
 			// Codex as installed: OpenAI, its own catalog, its default model
 			if err := dropBase(); err != nil {
 				return err
@@ -1870,6 +1881,19 @@ func codexIn(at place) *Agent {
 			if !routed() {
 				stash(map[string]string{at.key("codex.model"): get("model"), at.key("codex.effort"): get("model_reasoning_effort"),
 					at.key("codex.provider"): get("model_provider"), at.key("codex.catalog"): get("model_catalog_json")})
+			}
+			if custom.available() {
+				forget(at.key("codex.out"), at.key("codex.joined"), at.key("codex.beside"))
+				if err := writeOwnList(catalogPath, ownList()); err != nil {
+					return err
+				}
+				want, _ := openaiAuth()
+				if err := custom.take(at.v1(), keptBearerToken(codexCustomTable), want,
+					edit.KV{Path: "model_catalog_json", Value: catalogRef},
+					edit.KV{Path: "model", Value: v}); err != nil {
+					return err
+				}
+				return settle()
 			}
 			// a ChatGPT account the Codex app holds (out of allowance and
 			// of credits) keeps it from sending at all, a magpie model's
@@ -2042,7 +2066,7 @@ func codexIn(at place) *Agent {
 		// was on, the one last picked in its /model (the owner: 让 Codex 记住
 		// 上次的选择), and magpie's models join its list
 		Join: func() (bool, error) {
-			if api() || !chatGPT() || out() || isMagpie(get("model")) {
+			if custom.available() || api() || !chatGPT() || out() || isMagpie(get("model")) {
 				return false, nil
 			}
 			if p := get("model_provider"); p != "" && p != "openai" && !isCCSwitchMirror(p) {
@@ -2163,6 +2187,21 @@ func codexIn(at place) *Agent {
 			defer bringOfficial()
 			defer bringOver()
 			defer bringBack()
+			if customRouted() {
+				want, known := openaiAuth()
+				if table, err := edit.GetTOMLTable(path, codexCustomTable); err == nil && table["base_url"] == at.v1() &&
+					known && (table["requires_openai_auth"] == "true") != want {
+					if err := custom.take(at.v1(), keptBearerToken(codexCustomTable), want); err != nil {
+						return err
+					}
+				}
+				if m := get("model"); isMagpie(m) {
+					if to := pickedInstead("codex", m); to != "" {
+						return set(to)
+					}
+				}
+				return relist()
+			}
 			// model_catalog_json naming magpie's list with the list gone,
 			// as an older magpie's Disconnect could leave it (zwaydot on
 			// X): Codex loads no config at all then. Connected or not, the
@@ -2383,12 +2422,13 @@ func codexIn(at place) *Agent {
 			}
 			switch {
 			case asProvider():
-				t, err := edit.GetTOMLTable(path, "model_providers."+magpieID)
+				table := "model_providers." + get("model_provider")
+				t, err := edit.GetTOMLTable(path, table)
 				if err != nil {
 					return err.Error()
 				}
 				if t["base_url"] != at.v1() || !keyHolds(t["experimental_bearer_token"], at.gwKey()) || t["wire_api"] != "responses" {
-					return "Codex's [model_providers.magpie] no longer points at magpie's gateway (" + at.v1() + ")"
+					return "Codex's [" + table + "] no longer points at magpie's gateway (" + at.v1() + ")"
 				}
 				if c := get("model_catalog_json"); !ownCatalog(c) {
 					return "Codex's model_catalog_json is no longer magpie's list"

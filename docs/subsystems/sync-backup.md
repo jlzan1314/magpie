@@ -248,46 +248,36 @@ it does, and take it back.
   Settings → Sync → Undo the last sync, `magpie <kind> undo-sync`.
   Restore's Undo (`davsync/undo`) is unchanged: it undoes a Restore.
 
-## Backing up and importing selected sessions
+## Merging and applying sessions
 
-In **Settings → Sync and backup → Session sync**, select
-individual sessions or **All readable sessions**. The picker uses the same
-native transcript readers and session access choices as Sessions. Search
-the list or use the source Agent menu to narrow the selection. The first
-opening selects all readable sessions. Edits to the form are saved on
-this device in `session-batch-preferences.json` beside its settings and
-restored when the form reopens. A
-conversation from an unavailable reader cannot be selected. A blank
-conversation is skipped when selecting all. Enter existing backup IDs to
-merge earlier snapshots with the selection, and choose one or more import
-targets.
+In **Settings → Sync and backup → Session sync**, select the destination
+agents and choose **Merge and apply**. Magpie collects all locally readable
+conversations, converts them to one portable format, updates the WebDAV
+backup, and applies the merged result to the selected agents. A follower
+imports the current backup. **Sync sessions now** uploads independently.
+The portable format includes conversation text and readable tool items.
+The destination selection is saved on this device.
 
-The batch keeps one copy of identical transcripts across agents and retains
-their source references. A longer transcript replaces its own shorter
-revision when they share a source and agree through the last recorded
-part. Divergent copies remain separate. The portable records contain
-conversation text and readable tool items. Cross-agent import replays that
-context in the destination format. Native provider state and hidden
-reasoning are outside the portable records.
+The shared backup uses the normalized session title and original creation
+time as its identity across agents and devices. Copies with the same identity
+share one record. The latest activity wins. Equal activity times favor the
+longer history, then a stable fingerprint. A revised transcript from the
+same native source can replace its prior revision at the same activity time.
+Sessions without a title or creation time use their device and native source
+identity. Applying the merged result reuses the matching target session ID
+and retains its original creation time. An unchanged import is skipped
+during the next upload.
 
-WebDAV writers update **one current session backup** under
-`magpie/sessions/current/`. Its public backup ID stays the same. Each device
-owns a small authenticated manifest in `heads/`, lists only its own native
-sources there, and publishes it after verifying all new compressed, encrypted
-objects. Receivers read the union of the device manifests. Concurrent devices
-therefore cannot replace one another's conversations. Within one device an
-update checks the previous revision. An upload interrupted before the manifest
-commit leaves the previous complete session readable.
-
-A settled, file-backed Codex or Claude conversation can be skipped using its
-verified source stamp. Other readers compare the portable transcript. Appending
-to a conversation reuses its previously verified prefix and uploads only the
-new turns. A rewrite replaces the current revision of that source. Large pieces
-are split into encrypted parts. Restoring the conversation joins its pieces
-in order and verifies the checksum of the complete transcript. Equal histories
-are listed once; distinct device histories remain recoverable. Old immutable
-snapshots remain readable by ID and under **Older backups**. Upgrading does
-not delete them.
+The WebDAV backup keeps its public ID. Each session has a directory under
+`magpie/sessions/current/threads/` for its compressed, encrypted content.
+An append uploads only the new turns. A replacement updates the committed
+revision in the same directory. Large pieces are split into encrypted parts.
+The shared encrypted catalog commits the revision after the pieces are
+verified. Concurrent writers use WebDAV conditional requests with strong
+ETags. An interrupted upload leaves the previous committed revision readable.
+The first write of an upgraded client consolidates legacy device manifests
+and copies the live pieces into their per-session directories. Older backups
+remain available through **Recoverable backups**.
 
 The **Sync readable sessions** setting enables periodic backup of readable
 local conversations. The CLI equivalent is `magpie webdav set sessions=yes`.
@@ -323,24 +313,19 @@ manifest and referenced files before enabling restore. Conversation controls
 are created on demand and searched within the selected backup. Refresh and
 close cancel outstanding listing requests.
 
-The batch panel shows the WebDAV interval. On a receiving computer, enable
-**Import remote sessions into selected agents on WebDAV sync** and select
-the destination agents. After the current backup exists, the receiver reads
-its device manifests and imports new authenticated revisions. Older snapshots
-are available manually. A missing project folder defaults to the receiving
-user's home. **Advanced** exposes the optional project override for manual
-and automatic imports; an existing override is shown on open.
-
-Native import runs after backup, into the chosen Codex and Claude Code
-stores in parallel. Each target returns its new session ID and resume
-command. An identical session already in the target project is reused when
-Magpie can read it. A repeated import also reuses its earlier native session. Use a project override to place conversations in a particular folder. A failed import can
-be retried from the backup ID.
+**Import remote sessions into selected agents on WebDAV sync** applies
+revisions on subsequent syncs. Codex and Claude Code imports retain the
+original creation timestamp and reuse their previously imported session ID.
+An empty remote library can be rebuilt from any readable local copy.
+Codex rewrites use its native writer lock. New imports use `~/sessions`,
+and existing matched sessions keep their project directory when available.
+An individual CLI batch import supports an explicit project override.
+The backup picker can still restore earlier snapshots.
 
 ```sh
 magpie webdav sessions list
 magpie webdav sessions backups
-magpie webdav sessions auto-import --to codex --cwd /path/to/project
+magpie webdav sessions auto-import --to codex
 magpie webdav sessions auto-import off
 magpie webdav sessions sync
 magpie webdav sessions delete <backup-id> local
@@ -350,17 +335,17 @@ magpie webdav sessions batch --source codex:<id> --source opencode:<id>
 magpie webdav sessions batch --backup <backup-id> --to codex,claude --cwd /path/to/project
 ```
 
-Verification: `TestSessionBatch` covers native source selection, exact and
-append-only merge, divergent copies, separately encrypted backup objects,
-distribution to both agents, and repeated import.
+`TestSessionBatch` covers cross-agent deduplication, replacement and repeated
+import. `TestCurrentSessionAppendRestoresWholeThread` verifies the appended
+payload and restore. `TestScheduledWebDAVOverwritesSharedSessionAndKeepsCreationTime`
+checks both native creation timestamps, ID reuse and Codex writer-lock retry.
 
 ## Transferring a Codex session over WebDAV
 
-Settings → Sync → Codex session transfer and
 `magpie webdav sessions push <session-id>` send a selected Codex conversation
 from the current `CODEX_HOME`. Use the same account and sync passphrase on
-another computer and run `magpie webdav sessions pull <session-id>` or choose
-Download in the same panel. Resume it there with `codex resume <session-id>`
+another computer and run `magpie webdav sessions pull <session-id>`. Resume it
+there with `codex resume <session-id>`
 from the corresponding project. The conversation keeps its ID and native
 rollout records. The project files and the Codex account are outside the
 transfer.
@@ -423,7 +408,7 @@ clock.
   Self-contained ZIPs from earlier releases remain readable. Session-only changes produce a new
   version. Keep and delete apply to the companion too. On a version with
   sessions, **Restore sessions…** lets the user select Codex, Claude Code,
-  or both, an optional target project and the original passphrase. Existing
+  or both and enter the original passphrase if needed. New imports use `~/sessions`. Existing
   settings-only versions continue to restore normally.
 - **Pruning** (`pruneAuto`, WuMark1218 on X): at every look of the
   schedule (every 10 minutes, made or not) and after each write, per reason
