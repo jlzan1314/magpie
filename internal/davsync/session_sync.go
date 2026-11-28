@@ -68,6 +68,20 @@ func (s sessionSyncState) currentError() string {
 	return s.Error
 }
 
+func sessionImportDiagnostic(message string) string {
+	canceled := context.Canceled.Error()
+	if !strings.Contains(message, canceled) {
+		return message
+	}
+	var failures []string
+	for line := range strings.SplitSeq(message, "\n") {
+		if line != canceled && !strings.HasSuffix(line, ": "+canceled) {
+			failures = append(failures, line)
+		}
+	}
+	return strings.Join(failures, "\n")
+}
+
 func sessionUploadConfig() (Config, error) {
 	c, ok := Load()
 	if !ok || c.S3() || c.GitHub() {
@@ -152,20 +166,24 @@ func shareSessions(ctx context.Context, c Config, st *state) {
 	if st.Sessions == nil {
 		st.Sessions = &sessionSyncState{}
 	}
-	importErr := prefErr
-	if prefs.AutoImport && prefErr == nil {
+	var importError string
+	switch {
+	case prefErr != nil:
+		importError = prefErr.Error()
+	case prefs.AutoImport && ctx.Err() != nil:
+		importError = st.Sessions.ImportError
+	case prefs.AutoImport:
 		updateSessionActivity(ctx, func(a *SessionActivity) { a.Phase = "importing" })
 		n, err := receiveSessionBackups(ctx, c, prefs)
-		importErr = err
+		if err != nil {
+			importError = err.Error()
+		}
 		if n > 0 {
 			st.Sessions.Imported = n
 			st.Sessions.ImportedAt = time.Now()
 		}
 	}
-	st.Sessions.ImportError = ""
-	if importErr != nil {
-		st.Sessions.ImportError = importErr.Error()
-	}
+	st.Sessions.ImportError = sessionImportDiagnostic(importError)
 	job.finish(result, uploadErr)
 }
 

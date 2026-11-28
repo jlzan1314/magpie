@@ -193,6 +193,74 @@ func TestScheduledWebDAVImportsAndSkipsReturnedSessions(t *testing.T) {
 	}
 }
 
+func TestScheduledWebDAVCanceledImportDoesNotReportFailure(t *testing.T) {
+	fake := newSizeAwareDAV()
+	sessionCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var listings atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PROPFIND" {
+			listings.Add(1)
+			cancel()
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		fake.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+	config := Config{URL: server.URL + "/dav", User: "me", Password: "pw", Passphrase: "canceled session import"}
+	backupTestHome(t, t.TempDir(), config)
+	if err := SaveSessionPreferences(SessionPreferences{AutoImport: true, Targets: []string{"codex"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncNow(context.Background(), sessionCtx, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if listings.Load() == 0 || !errors.Is(sessionCtx.Err(), context.Canceled) {
+		t.Fatal("test did not cancel an active session import")
+	}
+	if got := loadState().Sessions.ImportError; got != "" {
+		t.Fatalf("canceled import saved an error: %q", got)
+	}
+	if err := Now(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if activity := SessionSyncActivity(); !strings.Contains(activity.ImportError, "HTTP 403") {
+		t.Fatalf("real import failure was lost: %+v", activity)
+	}
+	if err := syncNow(context.Background(), sessionCtx, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if activity := SessionSyncActivity(); !strings.Contains(activity.ImportError, "HTTP 403") {
+		t.Fatalf("skipping an import on a canceled sync hid the last real failure: %+v", activity)
+	}
+}
+
+func TestSessionActivityDropsStoredImportCancellation(t *testing.T) {
+	config := Config{URL: "http://127.0.0.1/dav", User: "me", Password: "pw", Passphrase: "stored session import status"}
+	backupTestHome(t, t.TempDir(), config)
+	status := state{Key: stateKey(config), Sessions: &sessionSyncState{Imported: 3, ImportedAt: time.Now()}}
+	job, _ := beginSessionJob(config)
+	t.Cleanup(func() { job.finish(SessionBatchResult{}, nil) })
+	ctx := context.WithValue(context.Background(), sessionJobKey{}, job)
+	updateSessionActivity(ctx, func(a *SessionActivity) { a.Phase, a.Objects, a.Count = "uploading", 231, 2476 })
+	for _, test := range []struct{ stored, want string }{
+		{"context canceled", ""},
+		{"reading WebDAV object: context canceled\ncontext canceled", ""},
+		{"reading WebDAV object: context canceled\nlisting session backups on WebDAV: HTTP 403", "listing session backups on WebDAV: HTTP 403"},
+		{"reading WebDAV object: context deadline exceeded", "reading WebDAV object: context deadline exceeded"},
+	} {
+		status.Sessions.ImportError = test.stored
+		if err := saveState(status); err != nil {
+			t.Fatal(err)
+		}
+		activity := SessionSyncActivity()
+		if activity.ImportError != test.want || activity.Phase != "uploading" || activity.Objects != 231 || activity.Count != 2476 || activity.Imported != 3 || activity.ImportedAt.IsZero() {
+			t.Errorf("stored %q, want import error %q and intact upload progress and import history: %+v", test.stored, test.want, activity)
+		}
+	}
+}
+
 func TestScheduledWebDAVImportsOnlyRecentSessions(t *testing.T) {
 	skipSessionFixtureFlushes(t)
 	fake := newSizeAwareDAV()
